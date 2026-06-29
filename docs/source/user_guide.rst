@@ -114,6 +114,34 @@ The following snippet provides an example of how to build and create a storm cat
    If using Windows, set `use_threads` to `False` in order to avoid issues with multiprocessing. On Linux/WSL, set `use_threads` to `True`.
    The use of ProcessPoolExecutor on Linux can lead to complications due to the way processes are spawned. More investigation is needed on this.
 
+DSS source and target products
+------------------------------
+
+By default, ``add_storm_dss_files`` writes a ``dss-source`` asset at each
+storm's original AORC location. To also create a value-preserving transposed
+grid at the catalog watershed, request the target product explicitly:
+
+.. code-block:: python
+
+   add_storm_dss_files(
+      storm_catalog,
+      collection_id="24hr-events",
+      output_modes=("source", "target"),
+      target_buffer_km=5,
+      item_ids=["1"],  # Omit to process every item in the collection.
+   )
+
+The ``dss-source`` asset preserves the selected storm's source placement. The
+``dss-target`` asset is translated on the 1-km SHG grid and clipped to the
+watershed plus ``target_buffer_km``. StormHub records the source and target
+centers, snapped SHG-cell offset, residual offset, grid bounds, and validation
+status in the STAC asset metadata. Each target item also receives a
+``dss-validation`` JSON asset, and the collection receives a CSV DSS manifest.
+
+Start with one ``item_ids`` value as a smoke test before processing a full
+collection. A target product should only be treated as model-ready when its
+spatial and DSS record-count validations both report ``passed``.
+
 Viewing Results
 ----------------
 Example Collection created for the indian-creek example data.

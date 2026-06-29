@@ -76,8 +76,8 @@ def test_storm_dss_filename_includes_event_identity() -> None:
     assert storm_dss_filename(item, output_resolution_km=1) == "r007_20200102T0600_24h_aorc_shg1k_source.dss"
 
 
-def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monkeypatch) -> None:
-    """Write relative DSS item assets and a collection-level manifest."""
+def make_dss_catalog(root: Path) -> pystac.Catalog:
+    """Create a saved storm catalog suitable for DSS export tests."""
     catalog = make_catalog("24hr-events")
     collection = catalog.get_child("24hr-events")
     collection.add_item(
@@ -86,7 +86,9 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
             geometry={"type": "Point", "coordinates": [0.5, 0.5]},
             bbox=[0.5, 0.5, 0.5, 0.5],
             datetime=None,
-            properties={},
+            properties={
+                "aorc:transform": {"a": 1.0, "b": 0.0, "c": 0.25, "d": 0.0, "e": 1.0, "f": 0.25}
+            },
             start_datetime=datetime(2020, 1, 2, tzinfo=timezone.utc),
             end_datetime=datetime(2020, 1, 3, tzinfo=timezone.utc),
         )
@@ -103,8 +105,26 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
             properties={},
         )
     )
-    catalog.normalize_hrefs(str(tmp_path))
+    catalog.add_item(
+        pystac.Item(
+            id="watershed-domain",
+            geometry={
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5], [0, 0]]],
+            },
+            bbox=[0, 0, 0.5, 0.5],
+            datetime=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            properties={"hydro_domain:type": "watershed"},
+        )
+    )
+    catalog.normalize_hrefs(str(root))
     catalog.save(catalog_type=pystac.CatalogType.SELF_CONTAINED)
+    return catalog
+
+
+def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monkeypatch) -> None:
+    """Write relative DSS item assets and a collection-level manifest."""
+    catalog = make_dss_catalog(tmp_path)
 
     def fake_dss_writer(output_path, *_args, **_kwargs) -> None:
         Path(output_path).write_bytes(b"test-dss")
@@ -114,7 +134,6 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
     add_storm_dss_files(
         catalog,
         collection_id="24hr-events",
-        dss_output_dir=str(dss_dir),
         output_resolution_km=1,
     )
 
@@ -131,3 +150,74 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
     manifest = (dss_dir / "dss-manifest.csv").read_text(encoding="utf-8")
     assert "r001_20200102T0000_24h_aorc_shg1k_source.dss" in manifest
     assert "source" in manifest
+
+
+def test_add_storm_dss_files_records_target_translation(tmp_path, monkeypatch) -> None:
+    """Write distinct source and target assets with projected translation metadata."""
+    catalog = make_dss_catalog(tmp_path)
+    translation = {
+        "method": "shg-cell-snap",
+        "direction": "source-to-target",
+        "source_center_x": 10000.0,
+        "source_center_y": 20000.0,
+        "target_center_x": 5000.0,
+        "target_center_y": 8000.0,
+        "raw_x_offset_m": -5100.0,
+        "raw_y_offset_m": -11900.0,
+        "x_offset_m": -5000,
+        "y_offset_m": -12000,
+        "x_offset_cells": -5,
+        "y_offset_cells": -12,
+        "x_snap_residual_m": -100.0,
+        "y_snap_residual_m": 100.0,
+        "spatial_validation": {
+            "PRECIPITATION": {
+                "status": "passed",
+                "values_preserved": True,
+                "target_rows": 100,
+                "target_columns": 120,
+                "target_bounds": [0.0, 0.0, 120000.0, 100000.0],
+            }
+        },
+        "dss_validation": {
+            "source": {"status": "passed"},
+            "target": {"status": "passed"},
+        },
+    }
+
+    def fake_product_writer(output_dss_paths, **_kwargs):
+        for output_path in output_dss_paths.values():
+            Path(output_path).write_bytes(b"test-dss")
+        return translation
+
+    monkeypatch.setattr("stormhub.met.storm_catalog.noaa_zarr_to_dss_products", fake_product_writer)
+    dss_dir = tmp_path / "24hr-events" / "dss"
+    add_storm_dss_files(
+        catalog,
+        collection_id="24hr-events",
+        dss_output_dir=str(dss_dir),
+        output_resolution_km=1,
+        output_modes=("source", "target"),
+        target_buffer_km=5,
+    )
+
+    saved_item = pystac.Item.from_file(str(tmp_path / "24hr-events" / "1" / "1.json"))
+    assert set(saved_item.assets).issuperset({"dss-source", "dss-target"})
+    target_asset = saved_item.assets["dss-target"]
+    assert target_asset.href == "../dss/r001_20200102T0000_24h_aorc_shg1k_target.dss"
+    assert target_asset.roles == ["data", "target"]
+    assert target_asset.extra_fields["stormhub:target_watershed_id"] == "watershed-domain"
+    assert target_asset.extra_fields["stormhub:x_offset_m"] == -5000
+    assert target_asset.extra_fields["stormhub:y_offset_cells"] == -12
+    assert target_asset.extra_fields["stormhub:validation_status"] == "passed"
+    assert target_asset.extra_fields["proj:shape"] == [100, 120]
+    assert saved_item.assets["dss-validation"].href == "1.dss-validation.json"
+    validation_path = tmp_path / "24hr-events" / "1" / "1.dss-validation.json"
+    assert validation_path.exists()
+    assert '"values_preserved": true' in validation_path.read_text(encoding="utf-8")
+
+    manifest = (dss_dir / "dss-manifest.csv").read_text(encoding="utf-8")
+    assert "dss-source" in manifest
+    assert "dss-target" in manifest
+    assert "target" in manifest
+    assert "passed" in manifest

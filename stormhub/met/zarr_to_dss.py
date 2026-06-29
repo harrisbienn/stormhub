@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from enum import Enum
 import math
+import os
 from typing import List, Tuple, Literal, Dict
 from affine import Affine
 from hecdss import HecDss, gridded_data
@@ -10,7 +11,11 @@ import numpy as np
 from pandas import Timestamp
 import geopandas as gpd
 from geopandas import GeoDataFrame
+from pyproj import Transformer
 import s3fs
+from shapely.geometry import mapping
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform as transform_geometry
 import xarray as xr
 import rioxarray  # noqa: F401
 from stormhub.met.consts import NOAA_AORC_S3_BASE_URL, KM_TO_M_CONVERSION_FACTOR, SHG_WKT
@@ -403,6 +408,172 @@ def reproject_to_shg(data: xr.DataArray, output_resolution_km: int) -> xr.DataAr
     return xr.concat(reprojected_chunks, dim="time")
 
 
+def project_geometry_to_shg(geometry: BaseGeometry) -> BaseGeometry:
+    """Project a WGS84 geometry to the Standard Hydrologic Grid CRS."""
+    transformer = Transformer.from_crs("EPSG:4326", SHG_WKT, always_xy=True)
+    return transform_geometry(transformer.transform, geometry)
+
+
+def calculate_shg_translation(
+    source_geometry: BaseGeometry,
+    target_geometry: BaseGeometry,
+    output_resolution_km: int,
+) -> dict:
+    """Calculate a source-to-target translation snapped to whole SHG cells."""
+    resolution_m = output_resolution_km * KM_TO_M_CONVERSION_FACTOR
+    source_centroid = project_geometry_to_shg(source_geometry).centroid
+    target_centroid = project_geometry_to_shg(target_geometry).centroid
+    raw_x_offset_m = target_centroid.x - source_centroid.x
+    raw_y_offset_m = target_centroid.y - source_centroid.y
+    x_offset_cells = int(round(raw_x_offset_m / resolution_m))
+    y_offset_cells = int(round(raw_y_offset_m / resolution_m))
+    x_offset_m = x_offset_cells * resolution_m
+    y_offset_m = y_offset_cells * resolution_m
+
+    return {
+        "method": "shg-cell-snap",
+        "direction": "source-to-target",
+        "source_center_x": source_centroid.x,
+        "source_center_y": source_centroid.y,
+        "target_center_x": target_centroid.x,
+        "target_center_y": target_centroid.y,
+        "raw_x_offset_m": raw_x_offset_m,
+        "raw_y_offset_m": raw_y_offset_m,
+        "x_offset_m": x_offset_m,
+        "y_offset_m": y_offset_m,
+        "x_offset_cells": x_offset_cells,
+        "y_offset_cells": y_offset_cells,
+        "x_snap_residual_m": raw_x_offset_m - x_offset_m,
+        "y_snap_residual_m": raw_y_offset_m - y_offset_m,
+    }
+
+
+def translate_shg_data(data: xr.DataArray, x_offset_m: float, y_offset_m: float) -> xr.DataArray:
+    """Translate SHG data without changing its values or grid resolution."""
+    x_dim = data.rio.x_dim
+    y_dim = data.rio.y_dim
+    translated = data.assign_coords(
+        {
+            x_dim: data[x_dim] + x_offset_m,
+            y_dim: data[y_dim] + y_offset_m,
+        }
+    )
+    translated.rio.set_spatial_dims(x_dim=x_dim, y_dim=y_dim, inplace=True)
+    translated.rio.write_crs(data.rio.crs, inplace=True)
+    translated.rio.write_transform(translated.rio.transform(recalc=True), inplace=True)
+    return translated
+
+
+def clip_shg_data_to_geometry(
+    data: xr.DataArray,
+    target_geometry: BaseGeometry,
+    buffer_km: float = 0,
+) -> xr.DataArray:
+    """Clip SHG data to a buffered WGS84 target geometry."""
+    target_shg = project_geometry_to_shg(target_geometry)
+    if buffer_km:
+        target_shg = target_shg.buffer(buffer_km * KM_TO_M_CONVERSION_FACTOR)
+    return data.rio.clip([mapping(target_shg)], crs=SHG_WKT, drop=True, all_touched=True)
+
+
+def validate_translated_shg_data(
+    source_data: xr.DataArray,
+    target_data: xr.DataArray,
+    x_offset_m: float,
+    y_offset_m: float,
+    target_geometry: BaseGeometry = None,
+) -> dict:
+    """Verify that target clipping preserves translated source values."""
+    translated_source = translate_shg_data(source_data, x_offset_m, y_offset_m)
+    x_dim = target_data.rio.x_dim
+    y_dim = target_data.rio.y_dim
+    expected_target = translated_source.sel(
+        {
+            x_dim: target_data[x_dim],
+            y_dim: target_data[y_dim],
+        }
+    )
+    expected_values = expected_target.to_numpy()
+    target_values = target_data.to_numpy()
+    comparison_mask = np.isfinite(target_values)
+    compared_cells = int(comparison_mask.sum())
+    values_match = compared_cells > 0 and bool(
+        np.allclose(
+            expected_values[comparison_mask],
+            target_values[comparison_mask],
+            equal_nan=False,
+        )
+    )
+    target_bounds = tuple(float(value) for value in target_data.rio.bounds())
+    target_geometry_bounds = None
+    target_geometry_covered = True
+    if target_geometry is not None:
+        target_geometry_bounds = tuple(
+            float(value) for value in project_geometry_to_shg(target_geometry).bounds
+        )
+        target_geometry_covered = (
+            target_bounds[0] <= target_geometry_bounds[0]
+            and target_bounds[1] <= target_geometry_bounds[1]
+            and target_bounds[2] >= target_geometry_bounds[2]
+            and target_bounds[3] >= target_geometry_bounds[3]
+        )
+    passed = values_match and target_geometry_covered
+    return {
+        "status": "passed" if passed else "failed",
+        "values_preserved": values_match,
+        "target_geometry_covered": target_geometry_covered,
+        "source_time_steps": int(source_data.sizes.get("time", 0)),
+        "target_time_steps": int(target_data.sizes.get("time", 0)),
+        "target_rows": int(target_data.sizes[y_dim]),
+        "target_columns": int(target_data.sizes[x_dim]),
+        "compared_cells": compared_cells,
+        "target_bounds": target_bounds,
+        "target_geometry_bounds": target_geometry_bounds,
+    }
+
+
+def validate_dss_record_counts(
+    dss_path: str,
+    variable_duration_map: Dict[NOAADataVariable, int],
+) -> dict:
+    """Reopen a DSS file and verify record counts for each requested variable."""
+    expected = {
+        variable.dss_variable_title.upper(): int(duration)
+        for variable, duration in variable_duration_map.items()
+    }
+    actual = {variable: 0 for variable in expected}
+    unexpected_records = 0
+
+    try:
+        with HecDss(dss_path) as dss:
+            for path_obj in dss.get_catalog():
+                parts = str(path_obj).strip("/").split("/")
+                if len(parts) < 3:
+                    unexpected_records += 1
+                    continue
+                variable = parts[2].upper()
+                if variable in actual:
+                    actual[variable] += 1
+                else:
+                    unexpected_records += 1
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "expected_records": expected,
+            "actual_records": actual,
+            "unexpected_records": unexpected_records,
+            "error": str(exc),
+        }
+
+    passed = actual == expected and unexpected_records == 0
+    return {
+        "status": "passed" if passed else "failed",
+        "expected_records": expected,
+        "actual_records": actual,
+        "unexpected_records": unexpected_records,
+    }
+
+
 def write_shg_to_dss(
     output_dss_path: str,
     data: xr.DataArray,
@@ -524,6 +695,102 @@ def prepare_noaa_variable_for_dss(
     return data
 
 
+def remove_existing_dss_files(output_paths: List[str]) -> None:
+    """Remove prior DSS products so reruns do not retain record history or dead space."""
+    for output_path in dict.fromkeys(output_paths):
+        try:
+            os.remove(output_path)
+            logging.info("Replacing existing DSS output: %s", output_path)
+        except FileNotFoundError:
+            pass
+
+
+def noaa_zarr_to_dss_products(
+    output_dss_paths: Dict[str, str],
+    aoi_geometry_path: str,
+    aoi_name: str,
+    storm_start: datetime,
+    variable_duration_map: Dict[NOAADataVariable, int],
+    output_resolution_km: int,
+    source_geometry: BaseGeometry = None,
+    target_geometry: BaseGeometry = None,
+    target_buffer_km: float = 5,
+) -> dict | None:
+    """Create source and/or target DSS products from one AORC retrieval."""
+    invalid_roles = set(output_dss_paths) - {"source", "target"}
+    if invalid_roles:
+        raise ValueError(f"Unsupported DSS output roles: {sorted(invalid_roles)}")
+    if not output_dss_paths:
+        raise ValueError("At least one DSS output role is required.")
+    if "target" in output_dss_paths and (source_geometry is None or target_geometry is None):
+        raise ValueError("Source and target geometries are required for target DSS output.")
+
+    translation = None
+    if "target" in output_dss_paths:
+        translation = calculate_shg_translation(source_geometry, target_geometry, output_resolution_km)
+
+    spatial_validation = {}
+    aorc_data = get_noaa_data_for_dss(aoi_geometry_path, storm_start, variable_duration_map)
+    remove_existing_dss_files(list(output_dss_paths.values()))
+    for data_variable, duration in variable_duration_map.items():
+        source_data = prepare_noaa_variable_for_dss(aorc_data, data_variable, storm_start, duration)
+        shg_source_data = reproject_to_shg(source_data, output_resolution_km)
+
+        if "source" in output_dss_paths:
+            logging.info("Writing source-location data to DSS")
+            write_shg_to_dss(
+                output_dss_path=output_dss_paths["source"],
+                data=shg_source_data,
+                aoi_name=aoi_name,
+                param_name=data_variable.dss_variable_title,
+                param_measurement_type=data_variable.measurement_type,
+                param_measurement_unit=data_variable.measurement_unit,
+                output_resolution_km=output_resolution_km,
+                data_version="AORC",
+            )
+
+        if "target" in output_dss_paths:
+            logging.info("Translating source data to the target watershed")
+            shg_target_data = translate_shg_data(
+                shg_source_data,
+                translation["x_offset_m"],
+                translation["y_offset_m"],
+            )
+            shg_target_data = clip_shg_data_to_geometry(
+                shg_target_data,
+                target_geometry,
+                buffer_km=target_buffer_km,
+            )
+            spatial_validation[data_variable.dss_variable_title] = validate_translated_shg_data(
+                shg_source_data,
+                shg_target_data,
+                translation["x_offset_m"],
+                translation["y_offset_m"],
+                target_geometry=target_geometry,
+            )
+            logging.info("Writing target-transposed data to DSS")
+            write_shg_to_dss(
+                output_dss_path=output_dss_paths["target"],
+                data=shg_target_data,
+                aoi_name=aoi_name,
+                param_name=data_variable.dss_variable_title,
+                param_measurement_type=data_variable.measurement_type,
+                param_measurement_unit=data_variable.measurement_unit,
+                output_resolution_km=output_resolution_km,
+                data_version="AORC-TRANSPOSED",
+            )
+
+    dss_validation = {
+        role: validate_dss_record_counts(path, variable_duration_map)
+        for role, path in output_dss_paths.items()
+    }
+    if translation is None:
+        translation = {}
+    translation["spatial_validation"] = spatial_validation
+    translation["dss_validation"] = dss_validation
+    return translation
+
+
 def noaa_zarr_to_dss(
     output_dss_path: str,
     aoi_geometry_gpkg_path: str,
@@ -534,6 +801,7 @@ def noaa_zarr_to_dss(
 ):
     """Given a geometry and datetime information about a storm, writes variables of interest from NOAA dataset to DSS."""
     aorc_data = get_noaa_data_for_dss(aoi_geometry_gpkg_path, storm_start, variable_duration_map)
+    remove_existing_dss_files([output_dss_path])
 
     for data_variable, duration in variable_duration_map.items():
         source_data = prepare_noaa_variable_for_dss(aorc_data, data_variable, storm_start, duration)
