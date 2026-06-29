@@ -1260,11 +1260,24 @@ def get_transposition_item(catalog: pystac.Catalog, use_valid_region: bool = Fal
     raise ValueError(f"Could not find transposition region item in catalog: {catalog.id}.")
 
 
-def storm_dss_filename(item: pystac.Item, output_resolution_km: int = 1) -> str:
-    """Build a stable DSS filename from event metadata."""
+def storm_duration_hours(item: pystac.Item) -> float:
+    """Return the event duration represented by a STAC item."""
     start_date = datetime.strptime(item.properties["start_datetime"], "%Y-%m-%dT%H:%M:%SZ")
     end_date = datetime.strptime(item.properties["end_datetime"], "%Y-%m-%dT%H:%M:%SZ")
-    duration_hours = (end_date - start_date).total_seconds() / 3600
+    return (end_date - start_date).total_seconds() / 3600
+
+
+def storm_dss_filename(
+    item: pystac.Item,
+    output_resolution_km: int = 1,
+    spatial_role: str = "source",
+) -> str:
+    """Build a stable DSS filename from event metadata."""
+    if spatial_role not in {"source", "target"}:
+        raise ValueError(f"DSS spatial role must be 'source' or 'target', not '{spatial_role}'.")
+
+    start_date = datetime.strptime(item.properties["start_datetime"], "%Y-%m-%dT%H:%M:%SZ")
+    duration_hours = storm_duration_hours(item)
     duration_token = f"{duration_hours:g}".replace(".", "p")
     resolution_token = f"{output_resolution_km:g}".replace(".", "p")
 
@@ -1276,8 +1289,40 @@ def storm_dss_filename(item: pystac.Item, output_resolution_km: int = 1) -> str:
 
     return (
         f"{rank_token}_{start_date.strftime('%Y%m%dT%H%M')}_"
-        f"{duration_token}h_aorc_shg{resolution_token}k.dss"
+        f"{duration_token}h_aorc_shg{resolution_token}k_{spatial_role}.dss"
     )
+
+
+def dss_spatial_role(asset_key: str, asset: pystac.Asset) -> str:
+    """Return the source or target role recorded for a DSS asset."""
+    role = asset.extra_fields.get("stormhub:spatial_role")
+    if role in {"source", "target"}:
+        return role
+    if "target" in (asset.roles or []) or asset_key.endswith("target"):
+        return "target"
+    return "source"
+
+
+def source_dss_metadata(
+    item: pystac.Item,
+    source_domain_id: str,
+    output_resolution_km: int,
+    dss_output_path: str,
+) -> dict:
+    """Build metadata that identifies a source-location DSS asset."""
+    return {
+        "stormhub:spatial_role": "source",
+        "stormhub:data_source": "AORC",
+        "stormhub:source_domain_id": source_domain_id,
+        "stormhub:duration_hours": storm_duration_hours(item),
+        "stormhub:time_step": "PT1H",
+        "stormhub:time_zone": "UTC",
+        "stormhub:output_crs": "EPSG:5070",
+        "stormhub:output_resolution_m": output_resolution_km * 1000,
+        "stormhub:translation_method": "none",
+        "file:size": os.path.getsize(dss_output_path),
+        "proj:code": "EPSG:5070",
+    }
 
 
 def relative_local_href(path: str, stac_object_href: str) -> str:
@@ -1306,15 +1351,24 @@ def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> 
                 rank = int(item.id)
             except ValueError:
                 rank = item.properties.get("aorc:collection_rank")
+            spatial_role = dss_spatial_role(asset_key, asset)
             rows.append(
                 {
                     "item_id": item.id,
                     "rank": rank,
+                    "spatial_role": spatial_role,
                     "start_datetime": item.properties.get("start_datetime"),
                     "end_datetime": item.properties.get("end_datetime"),
+                    "duration_hours": asset.extra_fields.get(
+                        "stormhub:duration_hours", storm_duration_hours(item)
+                    ),
                     "asset_key": asset_key,
                     "dss_filename": os.path.basename(asset.href),
                     "dss_href": Path(os.path.relpath(absolute_href, start=collection_dir)).as_posix(),
+                    "target_watershed_id": asset.extra_fields.get("stormhub:target_watershed_id"),
+                    "x_offset_m": asset.extra_fields.get("stormhub:x_offset_m"),
+                    "y_offset_m": asset.extra_fields.get("stormhub:y_offset_m"),
+                    "validation_status": asset.extra_fields.get("stormhub:validation_status", "not_run"),
                 }
             )
 
@@ -1323,11 +1377,17 @@ def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> 
     columns = [
         "item_id",
         "rank",
+        "spatial_role",
         "start_datetime",
         "end_datetime",
+        "duration_hours",
         "asset_key",
         "dss_filename",
         "dss_href",
+        "target_watershed_id",
+        "x_offset_m",
+        "y_offset_m",
+        "validation_status",
     ]
     manifest = pd.DataFrame(rows, columns=columns)
     if not manifest.empty:
@@ -1393,7 +1453,11 @@ def add_storm_dss_files(
 
             full_start_date = item.properties["start_datetime"]
             start_date_dt = datetime.strptime(full_start_date, "%Y-%m-%dT%H:%M:%SZ")
-            dss_fn = storm_dss_filename(item, output_resolution_km=output_resolution_km)
+            dss_fn = storm_dss_filename(
+                item,
+                output_resolution_km=output_resolution_km,
+                spatial_role="source",
+            )
             dss_output_path = os.path.join(dss_dir, dss_fn)
 
             item_variable_duration_map = variable_duration_map
@@ -1415,17 +1479,23 @@ def add_storm_dss_files(
             )
 
             for asset_key, asset in list(item.assets.items()):
-                if asset.media_type == "application/x-dss":
+                if asset.media_type == "application/x-dss" and dss_spatial_role(asset_key, asset) == "source":
                     item.assets.pop(asset_key)
 
             item.add_asset(
-                "dss",
+                "dss-source",
                 Asset(
                     href=relative_local_href(dss_output_path, item_href),
                     title=dss_fn,
-                    description="DSS file containing meteorological data for storm period.",
+                    description="Source-location DSS file containing AORC meteorological data for the storm period.",
                     media_type="application/x-dss",
-                    roles=["data"],
+                    roles=["data", "source"],
+                    extra_fields=source_dss_metadata(
+                        item,
+                        source_domain_id=transpo_item.id,
+                        output_resolution_km=output_resolution_km,
+                        dss_output_path=dss_output_path,
+                    ),
                 ),
             )
             item.save_object()

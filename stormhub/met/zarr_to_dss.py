@@ -12,6 +12,7 @@ import geopandas as gpd
 from geopandas import GeoDataFrame
 import s3fs
 import xarray as xr
+import rioxarray  # noqa: F401
 from stormhub.met.consts import NOAA_AORC_S3_BASE_URL, KM_TO_M_CONVERSION_FACTOR, SHG_WKT
 import logging
 
@@ -382,9 +383,29 @@ def get_s3_zarr_data(
     return ds
 
 
-def write_to_dss(
+def reproject_to_shg(data: xr.DataArray, output_resolution_km: int) -> xr.DataArray:
+    """Reproject gridded meteorological data to the Standard Hydrologic Grid."""
+    output_resolution_m = output_resolution_km * KM_TO_M_CONVERSION_FACTOR
+    times = data.time.values
+    logging.info("Reprojecting source dataset to SHG at %s km resolution", output_resolution_km)
+
+    if len(times) <= 144:
+        return data.rio.reproject(SHG_WKT, resolution=output_resolution_m)
+
+    logging.info("Chunking dataset for SHG reprojection")
+    time_chunk_size = 144
+    reprojected_chunks = []
+    for i in range(0, len(times), time_chunk_size):
+        chunk_times = times[i : i + time_chunk_size]
+        chunk = data.sel(time=chunk_times)
+        reprojected_chunks.append(chunk.rio.reproject(SHG_WKT, resolution=output_resolution_m))
+
+    return xr.concat(reprojected_chunks, dim="time")
+
+
+def write_shg_to_dss(
     output_dss_path: str,
-    data: xr.Dataset,
+    data: xr.DataArray,
     aoi_name: str,
     param_name: str,
     param_measurement_type: MeasurementType,
@@ -392,40 +413,20 @@ def write_to_dss(
     output_resolution_km: int,
     data_version: str,
 ):
-    """
-    Write geospatial data to a DSS file while transforming the data to fit DSS conventions.
+    """Write data already projected to SHG into a DSS file.
 
     Args:
         output_dss_path: Path to the output DSS file
-        zarr_data: An xarray dataset containing the geospatial data to be written to the DSS file
+        data: An SHG-projected xarray array containing data to be written
         aoi_name: The name of the area of interest (AOI)
-        parameter_name: The name of the parameter being stored in the DSS file (e.g. "precipitation")
-        parameter_measurement_type: The type of measurement type of the parameter
+        param_name: The name of the parameter being stored in the DSS file
+        param_measurement_type: The measurement type of the parameter
+        param_measurement_unit: The units of the parameter
         output_resolution_km: The resolution for the data in km
         data_version: Represents where the data comes from (e.g. "AORC")
     """
     dss = HecDss(output_dss_path)
     output_resolution_m = output_resolution_km * KM_TO_M_CONVERSION_FACTOR
-
-    logging.info(f"reprojecting dataset")
-    times = data.time.values
-
-    if len(times) <= 144:
-        data: xr.DataArray = data.rio.reproject(SHG_WKT, resolution=output_resolution_m)
-    else:
-        # For larger datasets, chunking is used to avoid memory issues
-        logging.info(f"Chunking dataset for reprojection")
-        time_chunk_size = 144
-        reprojected_chunks = []
-
-        for i in range(0, len(times), time_chunk_size):
-            chunk_times = times[i : i + time_chunk_size]
-            chunk = data.sel(time=chunk_times)
-            chunk = chunk.rio.reproject(SHG_WKT, resolution=output_resolution_m)
-            reprojected_chunks.append(chunk)
-
-        data = xr.concat(reprojected_chunks, dim="time")
-
     lower_x, lower_y = get_lower_left_xy(data, output_resolution_m)
 
     for time_step in data.time:
@@ -462,6 +463,67 @@ def write_to_dss(
     dss.close()
 
 
+def write_to_dss(
+    output_dss_path: str,
+    data: xr.DataArray,
+    aoi_name: str,
+    param_name: str,
+    param_measurement_type: MeasurementType,
+    param_measurement_unit: str,
+    output_resolution_km: int,
+    data_version: str,
+):
+    """Reproject geospatial data to SHG and write it to a DSS file."""
+    shg_data = reproject_to_shg(data, output_resolution_km)
+    write_shg_to_dss(
+        output_dss_path=output_dss_path,
+        data=shg_data,
+        aoi_name=aoi_name,
+        param_name=param_name,
+        param_measurement_type=param_measurement_type,
+        param_measurement_unit=param_measurement_unit,
+        output_resolution_km=output_resolution_km,
+        data_version=data_version,
+    )
+
+
+def get_noaa_data_for_dss(
+    aoi_geometry_path: str,
+    storm_start: datetime,
+    variable_duration_map: Dict[NOAADataVariable, int],
+) -> xr.Dataset:
+    """Retrieve the AORC subset required for a DSS event export."""
+    all_variables = list(variable_duration_map.keys())
+    min_start = storm_start + timedelta(hours=1)
+    max_end = storm_start + timedelta(hours=max(variable_duration_map.values()))
+    aorc_paths = get_aorc_paths(min_start, max_end)
+    aoi_gdf = gpd.read_file(aoi_geometry_path)
+    voi_keys = [variable.value for variable in all_variables]
+
+    logging.info("Getting AORC data")
+    data = get_s3_zarr_data(aorc_paths, aoi_gdf, min_start, max_end, voi_keys)
+    logging.info("Successfully retrieved AORC data")
+    return data
+
+
+def prepare_noaa_variable_for_dss(
+    aorc_data: xr.Dataset,
+    data_variable: NOAADataVariable,
+    storm_start: datetime,
+    duration_hours: int,
+) -> xr.DataArray:
+    """Select and convert one AORC variable for a DSS event window."""
+    var_start = storm_start + timedelta(hours=1)
+    var_end = storm_start + timedelta(hours=duration_hours)
+    data = aorc_data[data_variable.value].sel(time=slice(var_start, var_end))
+
+    if data_variable == NOAADataVariable.TMP:
+        logging.info("Converting temperature dataset")
+        data = convert_temperature_dataset(data)
+        logging.info("Successfully converted temperature dataset")
+    return data
+
+
 def noaa_zarr_to_dss(
     output_dss_path: str,
     aoi_geometry_gpkg_path: str,
@@ -471,33 +533,15 @@ def noaa_zarr_to_dss(
     output_resolution_km: int,
 ):
     """Given a geometry and datetime information about a storm, writes variables of interest from NOAA dataset to DSS."""
-    # arrange parameters
-    all_variables = list(variable_duration_map.keys())
-    min_start = storm_start + timedelta(hours=1)  # make exclusive
-    max_end = storm_start + timedelta(hours=max(variable_duration_map.values()))
-    aorc_paths = get_aorc_paths(min_start, max_end)
-    aoi_gdf = gpd.read_file(aoi_geometry_gpkg_path)
-    voi_keys = [v.value for v in all_variables]
+    aorc_data = get_noaa_data_for_dss(aoi_geometry_gpkg_path, storm_start, variable_duration_map)
 
-    # get aorc data
-    logging.info("Getting aorc data")
-    aorc_data = get_s3_zarr_data(aorc_paths, aoi_gdf, min_start, max_end, voi_keys)
-    logging.info("Successfully retrieved aorc data")
-
-    # write to dss
     for data_variable, duration in variable_duration_map.items():
-        var_start = storm_start + timedelta(hours=1)
-        var_end = storm_start + timedelta(hours=duration)
-        data = aorc_data[data_variable.value].sel(time=slice(var_start, var_end))
-
-        if data_variable == NOAADataVariable.TMP:
-            logging.info("converting temperature dataset")
-            data = convert_temperature_dataset(data)
-            logging.info("Successfully converted temperature dataset")
-        logging.info("writing to dss")
-        write_to_dss(
+        source_data = prepare_noaa_variable_for_dss(aorc_data, data_variable, storm_start, duration)
+        shg_source_data = reproject_to_shg(source_data, output_resolution_km)
+        logging.info("Writing source-location data to DSS")
+        write_shg_to_dss(
             output_dss_path=output_dss_path,
-            data=data,
+            data=shg_source_data,
             aoi_name=aoi_name,
             param_name=data_variable.dss_variable_title,
             param_measurement_type=data_variable.measurement_type,

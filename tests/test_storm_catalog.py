@@ -73,7 +73,7 @@ def test_storm_dss_filename_includes_event_identity() -> None:
         end_datetime=datetime(2020, 1, 3, 6, tzinfo=timezone.utc),
     )
 
-    assert storm_dss_filename(item, output_resolution_km=1) == "r007_20200102T0600_24h_aorc_shg1k.dss"
+    assert storm_dss_filename(item, output_resolution_km=1) == "r007_20200102T0600_24h_aorc_shg1k_source.dss"
 
 
 def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monkeypatch) -> None:
@@ -119,10 +119,15 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
     )
 
     saved_item = pystac.Item.from_file(str(tmp_path / "24hr-events" / "1" / "1.json"))
-    assert saved_item.assets["dss"].href == "../dss/r001_20200102T0000_24h_aorc_shg1k.dss"
-    assert saved_item.assets["dss"].roles == ["data"]
+    source_asset = saved_item.assets["dss-source"]
+    assert source_asset.href == "../dss/r001_20200102T0000_24h_aorc_shg1k_source.dss"
+    assert source_asset.roles == ["data", "source"]
+    assert source_asset.extra_fields["stormhub:spatial_role"] == "source"
+    assert source_asset.extra_fields["stormhub:translation_method"] == "none"
+    assert source_asset.extra_fields["proj:code"] == "EPSG:5070"
 
     saved_collection = pystac.Collection.from_file(str(tmp_path / "24hr-events" / "collection.json"))
     assert saved_collection.assets["dss_manifest"].href == "dss/dss-manifest.csv"
     manifest = (dss_dir / "dss-manifest.csv").read_text(encoding="utf-8")
-    assert "r001_20200102T0000_24h_aorc_shg1k.dss" in manifest
+    assert "r001_20200102T0000_24h_aorc_shg1k_source.dss" in manifest
+    assert "source" in manifest
