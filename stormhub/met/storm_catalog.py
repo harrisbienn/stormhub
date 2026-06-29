@@ -1219,13 +1219,33 @@ def parse_duration_from_id(collection_id: str) -> int:
         return None
 
 
-def get_events_collection(catalog: pystac.Catalog):
-    """Find storm events collection from given Catalog."""
-    for collection in catalog.get_all_collections():
-        if "-events" in collection.id:
-            return collection
+def get_events_collection(catalog: pystac.Catalog, collection_id: str = None):
+    """Find a storm events collection in the given catalog."""
+    event_collections = [
+        collection for collection in catalog.get_all_collections() if "-events" in collection.id
+    ]
 
+    if collection_id is not None:
+        for collection in event_collections:
+            if collection.id == collection_id:
+                return collection
+
+        available_ids = sorted(collection.id for collection in event_collections)
+        raise ValueError(
+            f"Could not find events collection '{collection_id}' in catalog '{catalog.id}'. "
+            f"Available events collections: {available_ids}."
+        )
+
+    if len(event_collections) == 1:
+        return event_collections[0]
+    if not event_collections:
         raise ValueError(f"Could not find events collection in catalog: {catalog.id}.")
+
+    available_ids = sorted(collection.id for collection in event_collections)
+    raise ValueError(
+        f"Multiple events collections found in catalog '{catalog.id}': {available_ids}. "
+        "Specify collection_id."
+    )
 
 
 def get_transposition_item(catalog: pystac.Catalog, use_valid_region: bool = False):
@@ -1240,6 +1260,94 @@ def get_transposition_item(catalog: pystac.Catalog, use_valid_region: bool = Fal
     raise ValueError(f"Could not find transposition region item in catalog: {catalog.id}.")
 
 
+def storm_dss_filename(item: pystac.Item, output_resolution_km: int = 1) -> str:
+    """Build a stable DSS filename from event metadata."""
+    start_date = datetime.strptime(item.properties["start_datetime"], "%Y-%m-%dT%H:%M:%SZ")
+    end_date = datetime.strptime(item.properties["end_datetime"], "%Y-%m-%dT%H:%M:%SZ")
+    duration_hours = (end_date - start_date).total_seconds() / 3600
+    duration_token = f"{duration_hours:g}".replace(".", "p")
+    resolution_token = f"{output_resolution_km:g}".replace(".", "p")
+
+    try:
+        rank_token = f"r{int(item.id):03d}"
+    except ValueError:
+        safe_item_id = re.sub(r"[^A-Za-z0-9_-]+", "-", item.id).strip("-")
+        rank_token = safe_item_id or "event"
+
+    return (
+        f"{rank_token}_{start_date.strftime('%Y%m%dT%H%M')}_"
+        f"{duration_token}h_aorc_shg{resolution_token}k.dss"
+    )
+
+
+def relative_local_href(path: str, stac_object_href: str) -> str:
+    """Return a POSIX-style href relative to a local STAC object."""
+    stac_object_dir = os.path.dirname(os.path.abspath(stac_object_href))
+    return Path(os.path.relpath(os.path.abspath(path), start=stac_object_dir)).as_posix()
+
+
+def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> str:
+    """Write a collection-level manifest for item DSS assets."""
+    collection_href = collection.get_self_href()
+    if collection_href is None:
+        raise ValueError(f"Collection '{collection.id}' must have a self href before writing a DSS manifest.")
+
+    collection_dir = os.path.dirname(os.path.abspath(collection_href))
+    rows = []
+    for item in collection.get_items():
+        for asset_key, asset in item.assets.items():
+            if asset.media_type != "application/x-dss":
+                continue
+
+            absolute_href = asset.get_absolute_href()
+            if absolute_href is None:
+                continue
+            try:
+                rank = int(item.id)
+            except ValueError:
+                rank = item.properties.get("aorc:collection_rank")
+            rows.append(
+                {
+                    "item_id": item.id,
+                    "rank": rank,
+                    "start_datetime": item.properties.get("start_datetime"),
+                    "end_datetime": item.properties.get("end_datetime"),
+                    "asset_key": asset_key,
+                    "dss_filename": os.path.basename(asset.href),
+                    "dss_href": Path(os.path.relpath(absolute_href, start=collection_dir)).as_posix(),
+                }
+            )
+
+    os.makedirs(manifest_dir, exist_ok=True)
+    manifest_path = os.path.join(manifest_dir, "dss-manifest.csv")
+    columns = [
+        "item_id",
+        "rank",
+        "start_datetime",
+        "end_datetime",
+        "asset_key",
+        "dss_filename",
+        "dss_href",
+    ]
+    manifest = pd.DataFrame(rows, columns=columns)
+    if not manifest.empty:
+        manifest.sort_values(by=["rank", "item_id"], na_position="last", inplace=True)
+    manifest.to_csv(manifest_path, index=False)
+
+    collection.add_asset(
+        "dss_manifest",
+        Asset(
+            href=relative_local_href(manifest_path, collection_href),
+            title="DSS Asset Manifest",
+            description="Manifest of HEC-DSS files attached to storm event items.",
+            media_type="text/csv",
+            roles=["metadata"],
+        ),
+    )
+    collection.save_object()
+    return manifest_path
+
+
 def add_storm_dss_files(
     catalog: pystac.catalog,
     aoi_name: str = None,
@@ -1247,6 +1355,7 @@ def add_storm_dss_files(
     variable_duration_map: Dict[NOAADataVariable, int] = None,
     dss_output_dir: str = None,
     output_resolution_km: int = 1,
+    collection_id: str = None,
 ):
     """
     Add dss files containing meteorological data to all storm items in events collection.
@@ -1257,12 +1366,13 @@ def add_storm_dss_files(
         use_valid_region (bool, optional): If True, the gridded DSS data will be confined to the valid transposition region. If False, the the data uses the entire transposition region. Defaults to False.
         variable_duration_map (Dict[NOAADataVariable, int], Optional): Optional variable map to include multiple variables and/or different durations for dss creation. If None is given, only precipitation is used at the duration between the storm items start and end time.
         dss_output_dir (str, optional): Optional output directory for dss files. If None, dss files are saved in the same directory as the associated storm item.
+        collection_id (str, optional): Events collection to export. Required when the catalog contains multiple events collections.
 
     """
     if isinstance(catalog, str):
         catalog = pystac.read_file(catalog)
 
-    events_collection = get_events_collection(catalog)
+    events_collection = get_events_collection(catalog, collection_id=collection_id)
     transpo_item = get_transposition_item(catalog, use_valid_region)
     transpo_href = transpo_item.get_self_href()
 
@@ -1271,46 +1381,63 @@ def add_storm_dss_files(
 
     for item in events_collection.get_items():
         try:
+            item_href = item.get_self_href()
+            if item_href is None:
+                raise ValueError(f"Storm item '{item.id}' must have a self href before adding DSS assets.")
+
             if dss_output_dir:
-                item_dir = os.path.abspath(dss_output_dir)
-                os.makedirs(item_dir, exist_ok=True)
+                dss_dir = os.path.abspath(dss_output_dir)
             else:
-                item_href = item.get_self_href()
-                item_dir = os.path.dirname(item_href)
+                dss_dir = os.path.dirname(item_href)
+            os.makedirs(dss_dir, exist_ok=True)
 
             full_start_date = item.properties["start_datetime"]
             start_date_dt = datetime.strptime(full_start_date, "%Y-%m-%dT%H:%M:%SZ")
-            start_date = start_date_dt.strftime("%Y%m%d")
+            dss_fn = storm_dss_filename(item, output_resolution_km=output_resolution_km)
+            dss_output_path = os.path.join(dss_dir, dss_fn)
 
-            dss_fn = f"{start_date}.dss"
-            dss_output_path = os.path.join(item_dir, dss_fn)
-
-            if variable_duration_map is None:
+            item_variable_duration_map = variable_duration_map
+            if item_variable_duration_map is None:
                 full_end_date = item.properties["end_datetime"]
                 end_date_dt = datetime.strptime(full_end_date, "%Y-%m-%dT%H:%M:%SZ")
                 time_difference = end_date_dt - start_date_dt
                 duration_hours = time_difference.total_seconds() / 3600
 
-                variable_duration_map = {NOAADataVariable.APCP: duration_hours}
+                item_variable_duration_map = {NOAADataVariable.APCP: duration_hours}
 
             noaa_zarr_to_dss(
-                dss_output_path, transpo_href, aoi_name, start_date_dt, variable_duration_map, output_resolution_km
+                dss_output_path,
+                transpo_href,
+                aoi_name,
+                start_date_dt,
+                item_variable_duration_map,
+                output_resolution_km,
             )
 
+            for asset_key, asset in list(item.assets.items()):
+                if asset.media_type == "application/x-dss":
+                    item.assets.pop(asset_key)
+
             item.add_asset(
-                dss_fn,
+                "dss",
                 Asset(
-                    dss_output_path,
-                    dss_fn,
+                    href=relative_local_href(dss_output_path, item_href),
+                    title=dss_fn,
                     description="DSS file containing meteorological data for storm period.",
                     media_type="application/x-dss",
-                    roles="data",
+                    roles=["data"],
                 ),
             )
             item.save_object()
             logging.info(f"Successfully saved storm dss file to: {dss_output_path}")
         except Exception as e:
             logging.error(f"Could not create dss file for item: {item.id} with error: {e}")
+
+    collection_href = events_collection.get_self_href()
+    if collection_href is None:
+        raise ValueError(f"Collection '{events_collection.id}' must have a self href before adding DSS assets.")
+    manifest_dir = os.path.abspath(dss_output_dir) if dss_output_dir else os.path.dirname(collection_href)
+    add_dss_manifest_asset(events_collection, manifest_dir)
 
 
 def avg_annual_max_grids(zarr_path: str, normal_precip_grid_path: str = "normalized_precip.tif"):
