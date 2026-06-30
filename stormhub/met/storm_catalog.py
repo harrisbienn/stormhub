@@ -1551,7 +1551,7 @@ def add_storm_dss_files(
     output_modes: tuple[str, ...] = ("source",),
     target_buffer_km: float = 5,
     item_ids: Optional[List[str]] = None,
-):
+) -> dict:
     """
     Add dss files containing meteorological data to all storm items in events collection.
 
@@ -1565,6 +1565,12 @@ def add_storm_dss_files(
         output_modes (tuple[str, ...]): DSS products to create. Supported values are "source" and "target".
         target_buffer_km (float): Buffer around the target watershed included in target DSS output.
         item_ids (List[str], optional): Item IDs to export. If omitted, all items are exported.
+
+    Returns
+    -------
+    dict
+        JSON-serializable run summary containing counts, per-item asset and
+        validation details, failures, and the collection manifest path.
 
     """
     if isinstance(catalog, str):
@@ -1598,6 +1604,8 @@ def add_storm_dss_files(
     if aoi_name is None:
         aoi_name = catalog.id
 
+    successful_items = []
+    failed_items = []
     for item in items:
         try:
             item_href = item.get_self_href()
@@ -1705,12 +1713,70 @@ def add_storm_dss_files(
             if product_result and product_result.get("dss_validation"):
                 add_dss_validation_asset(item, product_result)
             item.save_object()
-            logging.info("Successfully saved %s DSS products for storm item %s", modes, item.id)
-        except Exception as e:
-            logging.error(f"Could not create dss file for item: {item.id} with error: {e}")
+            item_result = {
+                "item_id": item.id,
+                "asset_hrefs": {
+                    mode: item.assets[f"dss-{mode}"].href for mode in modes
+                },
+                "validation_status": {
+                    mode: item.assets[f"dss-{mode}"].extra_fields.get(
+                        "stormhub:validation_status", "not_run"
+                    )
+                    for mode in modes
+                },
+            }
+            failed_validations = [
+                mode
+                for mode, validation_status in item_result["validation_status"].items()
+                if validation_status == "failed"
+            ]
+            if failed_validations:
+                failed_items.append(
+                    {
+                        **item_result,
+                        "error_type": "DSSValidationError",
+                        "error": f"DSS validation failed for: {', '.join(failed_validations)}",
+                    }
+                )
+                logging.error(
+                    "DSS validation failed for storm item %s: %s",
+                    item.id,
+                    failed_validations,
+                )
+            else:
+                successful_items.append(item_result)
+                logging.info("Successfully saved %s DSS products for storm item %s", modes, item.id)
+        except Exception as exc:
+            failed_items.append(
+                {
+                    "item_id": item.id,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            logging.error("Could not create DSS file for item %s: %s", item.id, exc)
 
     manifest_dir = os.path.abspath(dss_output_dir) if dss_output_dir else default_dss_dir
-    add_dss_manifest_asset(events_collection, manifest_dir)
+    manifest_path = add_dss_manifest_asset(events_collection, manifest_dir)
+    if failed_items and successful_items:
+        status = "partial"
+    elif failed_items:
+        status = "failed"
+    else:
+        status = "passed"
+
+    return {
+        "status": status,
+        "collection_id": events_collection.id,
+        "output_modes": list(modes),
+        "requested_count": len(items),
+        "succeeded_count": len(successful_items),
+        "failed_count": len(failed_items),
+        "successful_items": successful_items,
+        "failed_items": failed_items,
+        "manifest_path": os.path.abspath(manifest_path),
+        "manifest_href": relative_local_href(manifest_path, collection_href),
+    }
 
 
 def avg_annual_max_grids(zarr_path: str, normal_precip_grid_path: str = "normalized_precip.tif"):

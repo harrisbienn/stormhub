@@ -123,7 +123,7 @@ grid at the catalog watershed, request the target product explicitly:
 
 .. code-block:: python
 
-   add_storm_dss_files(
+   dss_result = add_storm_dss_files(
       storm_catalog,
       collection_id="24hr-events",
       output_modes=("source", "target"),
@@ -131,12 +131,19 @@ grid at the catalog watershed, request the target product explicitly:
       item_ids=["1"],  # Omit to process every item in the collection.
    )
 
+   if dss_result["failed_count"]:
+      raise RuntimeError(dss_result["failed_items"])
+
 The ``dss-source`` asset preserves the selected storm's source placement. The
 ``dss-target`` asset is translated on the 1-km SHG grid and clipped to the
 watershed plus ``target_buffer_km``. StormHub records the source and target
 centers, snapped SHG-cell offset, residual offset, grid bounds, and validation
 status in the STAC asset metadata. Each target item also receives a
 ``dss-validation`` JSON asset, and the collection receives a CSV DSS manifest.
+The returned summary reports the overall status, requested/succeeded/failed
+counts, per-item asset hrefs and validation states, failure details, and the
+manifest path. Invalid collection IDs or other run-level configuration errors
+still raise immediately.
 
 Start with one ``item_ids`` value as a smoke test before processing a full
 collection. A target product should only be treated as model-ready when its

@@ -131,11 +131,19 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
 
     monkeypatch.setattr("stormhub.met.storm_catalog.noaa_zarr_to_dss", fake_dss_writer)
     dss_dir = tmp_path / "24hr-events" / "dss"
-    add_storm_dss_files(
+    result = add_storm_dss_files(
         catalog,
         collection_id="24hr-events",
         output_resolution_km=1,
     )
+
+    assert result["status"] == "passed"
+    assert result["requested_count"] == 1
+    assert result["succeeded_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["successful_items"][0]["item_id"] == "1"
+    assert result["successful_items"][0]["validation_status"] == {"source": "not_run"}
+    assert result["manifest_href"] == "dss/dss-manifest.csv"
 
     saved_item = pystac.Item.from_file(str(tmp_path / "24hr-events" / "1" / "1.json"))
     source_asset = saved_item.assets["dss-source"]
@@ -192,7 +200,7 @@ def test_add_storm_dss_files_records_target_translation(tmp_path, monkeypatch) -
 
     monkeypatch.setattr("stormhub.met.storm_catalog.noaa_zarr_to_dss_products", fake_product_writer)
     dss_dir = tmp_path / "24hr-events" / "dss"
-    add_storm_dss_files(
+    result = add_storm_dss_files(
         catalog,
         collection_id="24hr-events",
         dss_output_dir=str(dss_dir),
@@ -200,6 +208,12 @@ def test_add_storm_dss_files_records_target_translation(tmp_path, monkeypatch) -
         output_modes=("source", "target"),
         target_buffer_km=5,
     )
+
+    assert result["status"] == "passed"
+    assert result["successful_items"][0]["validation_status"] == {
+        "source": "passed",
+        "target": "passed",
+    }
 
     saved_item = pystac.Item.from_file(str(tmp_path / "24hr-events" / "1" / "1.json"))
     assert set(saved_item.assets).issuperset({"dss-source", "dss-target"})
@@ -221,3 +235,80 @@ def test_add_storm_dss_files_records_target_translation(tmp_path, monkeypatch) -
     assert "dss-target" in manifest
     assert "target" in manifest
     assert "passed" in manifest
+
+
+def test_add_storm_dss_files_reports_item_failures(tmp_path, monkeypatch) -> None:
+    """Return an actionable failure summary while still writing the collection manifest."""
+    catalog = make_dss_catalog(tmp_path)
+
+    def failing_writer(*_args, **_kwargs) -> None:
+        raise RuntimeError("AORC unavailable")
+
+    monkeypatch.setattr("stormhub.met.storm_catalog.noaa_zarr_to_dss", failing_writer)
+
+    result = add_storm_dss_files(catalog, collection_id="24hr-events")
+
+    assert result["status"] == "failed"
+    assert result["requested_count"] == 1
+    assert result["succeeded_count"] == 0
+    assert result["failed_count"] == 1
+    assert result["failed_items"] == [
+        {
+            "item_id": "1",
+            "error_type": "RuntimeError",
+            "error": "AORC unavailable",
+        }
+    ]
+    assert Path(result["manifest_path"]).exists()
+
+
+def test_add_storm_dss_files_reports_validation_failures(tmp_path, monkeypatch) -> None:
+    """Treat a written but invalid DSS product as a failed export item."""
+    catalog = make_dss_catalog(tmp_path)
+
+    def invalid_product_writer(output_dss_paths, **_kwargs):
+        for output_path in output_dss_paths.values():
+            Path(output_path).write_bytes(b"invalid-dss")
+        return {
+            "method": "shg-cell-snap",
+            "direction": "source-to-target",
+            "source_center_x": 10000.0,
+            "source_center_y": 20000.0,
+            "target_center_x": 5000.0,
+            "target_center_y": 8000.0,
+            "raw_x_offset_m": -5100.0,
+            "raw_y_offset_m": -11900.0,
+            "x_offset_m": -5000,
+            "y_offset_m": -12000,
+            "x_offset_cells": -5,
+            "y_offset_cells": -12,
+            "x_snap_residual_m": -100.0,
+            "y_snap_residual_m": 100.0,
+            "spatial_validation": {
+                "PRECIPITATION": {
+                    "status": "failed",
+                    "values_preserved": False,
+                    "target_rows": 100,
+                    "target_columns": 120,
+                    "target_bounds": [0.0, 0.0, 120000.0, 100000.0],
+                }
+            },
+            "dss_validation": {"target": {"status": "passed"}},
+        }
+
+    monkeypatch.setattr(
+        "stormhub.met.storm_catalog.noaa_zarr_to_dss_products",
+        invalid_product_writer,
+    )
+
+    result = add_storm_dss_files(
+        catalog,
+        collection_id="24hr-events",
+        output_modes=("target",),
+    )
+
+    assert result["status"] == "failed"
+    assert result["succeeded_count"] == 0
+    assert result["failed_count"] == 1
+    assert result["failed_items"][0]["error_type"] == "DSSValidationError"
+    assert result["failed_items"][0]["validation_status"] == {"target": "failed"}
