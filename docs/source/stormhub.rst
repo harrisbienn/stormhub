@@ -8,6 +8,7 @@ Subpackages
    :maxdepth: 4
 
    stormhub.met
+   stormhub.scenarios
    stormhub.server
 
 Submodules

@@ -6,6 +6,7 @@ stormhub
 
    Technical Summary <tech_summary.rst>
    User Guide <user_guide.rst>
+   Scenario Run Contract <scenario_run_contract.rst>
    API Reference <modules.rst>
    Changelog <change_log.rst>
 
