@@ -25,6 +25,8 @@ Version 1.0.0 provides the following guarantees:
 * All timestamps are timezone-aware UTC values.
 * File inputs and outputs require SHA-256 checksums and byte sizes; the
   transposed DSS and watershed geometry are also checksum-pinned.
+* Every file reference has a stable ``asset_key`` used when it is published to
+  STAC; keys must be unique within a run.
 * Hrefs must be portable relative paths or absolute IRIs, not Windows paths.
 * The immutable run specification has a canonical SHA-256 digest.
 * Terminal lifecycle states require the timestamps and records needed to
@@ -81,6 +83,7 @@ requested watershed and that DSS validation passed::
    model_package = file_reference_from_path(
        "models/lwi-r3-ras.zip",
        manifest_path,
+       asset_key="hydraulic-model",
        media_type="application/zip",
        roles=["data", "model"],
    )
@@ -105,6 +108,49 @@ By default, ``scenario_run_spec_from_stac`` requires the ``dss-target`` asset,
 a ``passed`` DSS validation status, matching ``stormhub:target_watershed_id``,
 and a valid local checksum. These are submission gates, not merely descriptive
 metadata. Disable them only for explicit migration or diagnostic workflows.
+
+Publishing hydraulic runs
+-------------------------
+
+``publish_scenario_run`` writes the final manifest and publishes a STAC Item
+into a ``hydraulic-scenario-runs`` Collection::
+
+   import pystac
+
+   from stormhub.scenarios import publish_scenario_run
+
+   catalog = pystac.Catalog.from_file("catalogs/lwi-region3/catalog.json")
+   item = publish_scenario_run(
+       catalog,
+       completed_run,
+       manifest_path,
+       watershed_item,
+   )
+
+The publisher creates the Collection when necessary and writes Items under
+``hydraulic-scenario-runs/<run-id>/``. Each Item contains:
+
+* the versioned scenario manifest;
+* the watershed-transposed DSS input;
+* the versioned hydraulic model package;
+* every declared output, such as WSE, depth, velocity, HDF, logs, or reports;
+* a ``derived_from`` link to the precipitation scenario; and
+* a ``related`` link to the target watershed.
+
+Successful, failed, and cancelled terminal runs can be published. Failed runs
+retain their manifest and failure classification even when no hydraulic output
+was produced. Planned, queued, and running executions are rejected because
+their final provenance is incomplete.
+
+Publication verifies local checksums and sizes by default. A duplicate run ID
+is rejected. ``overwrite=True`` permits an idempotent republication only when
+the existing Item has the same specification digest; it cannot replace an
+existing run with different inputs under the same identity.
+
+Output metadata using ``proj:`` or ``raster:`` fields automatically declares
+the corresponding STAC extension on the published Item. This allows gridded
+WSE, depth, and velocity products to carry standards-based spatial metadata
+without forcing every possible hydraulic product into the core contract.
 
 Schema and compatibility
 ------------------------

@@ -91,6 +91,7 @@ def make_model_and_execution(root: Path, manifest_path: Path) -> tuple[Hydraulic
     model_package = file_reference_from_path(
         model_path,
         manifest_path,
+        asset_key="hydraulic-model",
         media_type="application/zip",
         roles=["data", "model"],
     )

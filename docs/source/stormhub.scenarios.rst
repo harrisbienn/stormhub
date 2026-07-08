@@ -16,3 +16,19 @@ stormhub.scenarios.contract module
    :members:
    :undoc-members:
    :show-inheritance:
+
+stormhub.scenarios.stac module
+------------------------------
+
+.. automodule:: stormhub.scenarios.stac
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+stormhub.scenarios.publisher module
+-----------------------------------
+
+.. automodule:: stormhub.scenarios.publisher
+   :members:
+   :undoc-members:
+   :show-inheritance:

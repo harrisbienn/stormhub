@@ -112,6 +112,7 @@ def file_reference_from_path(
     path: str | Path,
     manifest_path: str | Path,
     *,
+    asset_key: str,
     media_type: str,
     roles: list[str],
     title: str | None = None,
@@ -122,6 +123,7 @@ def file_reference_from_path(
     if not file_path.is_file():
         raise ValueError(f"Scenario artifact does not exist: {file_path}")
     return FileReference(
+        asset_key=asset_key,
         href=_portable_href(str(file_path), manifest_path),
         media_type=media_type,
         roles=roles,

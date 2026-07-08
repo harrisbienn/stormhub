@@ -32,9 +32,13 @@ from stormhub.scenarios import (
 UTC_START = datetime(2020, 1, 2, tzinfo=timezone.utc)
 
 
-def make_file_reference(href: str = "artifacts/model.zip") -> FileReference:
+def make_file_reference(
+    href: str = "artifacts/model.zip",
+    asset_key: str = "hydraulic-model",
+) -> FileReference:
     """Create a content-addressed file reference for tests."""
     return FileReference(
+        asset_key=asset_key,
         href=href,
         media_type="application/zip",
         roles=["data", "model"],
@@ -146,7 +150,7 @@ def test_succeeded_run_requires_output_and_valid_timestamps() -> None:
         status=RunStatus.SUCCEEDED,
         started_at=UTC_START,
         completed_at=completed_at,
-        outputs=[make_file_reference("outputs/wse.tif")],
+        outputs=[make_file_reference("outputs/wse.tif", asset_key="wse")],
         quality=QualitySummary(status=QualityStatus.PASSED),
     )
 

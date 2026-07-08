@@ -103,6 +103,11 @@
       "additionalProperties": false,
       "description": "Content-addressed reference to a run input or output file.",
       "properties": {
+        "asset_key": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Asset Key",
+          "type": "string"
+        },
         "href": {
           "minLength": 1,
           "title": "Href",
@@ -158,6 +163,7 @@
         }
       },
       "required": [
+        "asset_key",
         "href",
         "media_type",
         "roles",

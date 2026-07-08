@@ -81,6 +81,7 @@ class FileReference(ContractModel):
     """Content-addressed reference to a run input or output file."""
 
     kind: Literal["file"] = "file"
+    asset_key: Identifier
     href: NonEmptyString
     media_type: NonEmptyString
     roles: list[NonEmptyString] = Field(min_length=1)
@@ -251,6 +252,16 @@ class ScenarioRun(ContractModel):
         """Validate digest integrity and state-dependent fields."""
         if self.specification_sha256 != self.spec.sha256():
             raise ValueError("specification_sha256 does not match spec")
+
+        asset_keys = [
+            self.spec.precipitation.transposed_dss.asset_key,
+            self.spec.hydraulic_model.package.asset_key,
+            *(output.asset_key for output in self.outputs),
+        ]
+        if "scenario-run" in asset_keys:
+            raise ValueError("asset key 'scenario-run' is reserved for the contract manifest")
+        if len(asset_keys) != len(set(asset_keys)):
+            raise ValueError("DSS, model package, and output asset keys must be unique")
 
         terminal = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}
         started = terminal | {RunStatus.RUNNING}
