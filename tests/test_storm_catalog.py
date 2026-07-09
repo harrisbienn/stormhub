@@ -1,5 +1,7 @@
 """Tests for storm catalog collection selection."""
 
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -7,6 +9,8 @@ import pystac
 import pytest
 
 from stormhub.met.storm_catalog import add_storm_dss_files, get_events_collection, storm_dss_filename
+
+WINDOWS_DRIVE_HREF = re.compile(r"^[A-Za-z]:[/\\]")
 
 
 def make_collection(collection_id: str) -> pystac.Collection:
@@ -122,6 +126,28 @@ def make_dss_catalog(root: Path) -> pystac.Catalog:
     return catalog
 
 
+def iter_hrefs(value):
+    """Yield href values from nested STAC JSON objects."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "href":
+                yield child
+            else:
+                yield from iter_hrefs(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_hrefs(child)
+
+
+def assert_portable_stac_hrefs(root: Path) -> None:
+    """Assert saved STAC hrefs are portable relative paths or valid external URLs."""
+    for json_path in root.rglob("*.json"):
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        for href in iter_hrefs(payload):
+            assert not WINDOWS_DRIVE_HREF.match(href), f"{json_path} contains Windows drive href {href}"
+            assert "\\" not in href, f"{json_path} contains backslash href {href}"
+
+
 def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monkeypatch) -> None:
     """Write relative DSS item assets and a collection-level manifest."""
     catalog = make_dss_catalog(tmp_path)
@@ -158,6 +184,7 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
     manifest = (dss_dir / "dss-manifest.csv").read_text(encoding="utf-8")
     assert "r001_20200102T0000_24h_aorc_shg1k_source.dss" in manifest
     assert "source" in manifest
+    assert_portable_stac_hrefs(tmp_path)
 
 
 def test_add_storm_dss_files_records_target_translation(tmp_path, monkeypatch) -> None:
@@ -235,6 +262,7 @@ def test_add_storm_dss_files_records_target_translation(tmp_path, monkeypatch) -
     assert "dss-target" in manifest
     assert "target" in manifest
     assert "passed" in manifest
+    assert_portable_stac_hrefs(tmp_path)
 
 
 def test_add_storm_dss_files_reports_item_failures(tmp_path, monkeypatch) -> None:

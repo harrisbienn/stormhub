@@ -764,7 +764,10 @@ def storm_search(
             os.makedirs(item_dir)
         event_item.aorc_thumbnail(scale_max=scale_max)
         event_item.max_precip_point()
-        event_item.save_object(dest_href=catalog.spm.collection_item(collection_id, event_item.id))
+        event_item.save_object(
+            dest_href=catalog.spm.collection_item(collection_id, event_item.id),
+            include_self_link=False,
+        )
         return event_item
     else:
         result = {
@@ -1536,7 +1539,7 @@ def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> 
             roles=["metadata"],
         ),
     )
-    collection.save_object()
+    collection.save_object(include_self_link=False)
     return manifest_path
 
 
@@ -1712,7 +1715,7 @@ def add_storm_dss_files(
                 )
             if product_result and product_result.get("dss_validation"):
                 add_dss_validation_asset(item, product_result)
-            item.save_object()
+            item.save_object(include_self_link=False)
             item_result = {
                 "item_id": item.id,
                 "asset_hrefs": {
@@ -1970,7 +1973,7 @@ def stac_to_parquet(stac_object: Union[Collection, Catalog], parquet_file: str =
         parquet_asset.href = f"{s3_bucket_prefix}/{parquet_filename}"
 
     # Save the updated collection
-    stac_collection.save_object()
+    stac_collection.save_object(include_self_link=False)
 
     return parquet_result
 
