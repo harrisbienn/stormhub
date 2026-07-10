@@ -4,6 +4,7 @@ import json
 import logging
 import multiprocessing
 import os
+import shutil
 import traceback
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -419,7 +420,18 @@ class StormCatalog(pystac.Catalog):
                 elif self.spm.catalog_dir.replace("\\", "/") in asset.href:
                     asset.href = asset.href.replace(self.spm.catalog_dir.replace("\\", "/"), "..")
 
-            for item in collection.get_all_items():
+            try:
+                items = list(collection.get_all_items())
+            except pystac.errors.STACError as exc:
+                logging.warning(
+                    "Skipping item asset sanitization for collection '%s' because one or more item links "
+                    "could not be resolved: %s",
+                    collection.id,
+                    exc,
+                )
+                items = []
+
+            for item in items:
                 for asset in item.assets.values():
                     if self.spm.collection_item_dir(collection.id, item.id) in asset.href:
                         asset.href = asset.href.replace(self.spm.collection_item_dir(collection.id, item.id), ".")
@@ -787,6 +799,7 @@ def serial_processor(
     output_csv: str,
     event_dates: list[datetime],
     with_tb: bool = False,
+    overwrite_output: bool = False,
 ):
     """
     Run function in serial using only one processor.
@@ -798,8 +811,9 @@ def serial_processor(
         output_csv (str): Path to the output CSV file.
         event_dates (list[datetime]): List of event dates.
         with_tb (bool): Whether to include traceback in error logs.
+        overwrite_output (bool): Whether to overwrite the output CSV before processing.
     """
-    if not os.path.exists(output_csv):
+    if overwrite_output or not os.path.exists(output_csv):
         with open(output_csv, "w", encoding="utf-8") as f:
             f.write("storm_date,min,mean,max,x,y\n")
 
@@ -829,6 +843,7 @@ def multi_processor(
     num_workers: int = None,
     use_threads: bool = False,
     with_tb: bool = False,
+    overwrite_output: bool = False,
 ):
     """
     Run function in parallel using multiple processors or threads.
@@ -844,6 +859,7 @@ def multi_processor(
         num_workers (int, optional): Number of workers to use.
         use_threads (bool): Whether to use threads instead of processes.
         with_tb (bool): Whether to include traceback in error logs.
+        overwrite_output (bool): Whether to overwrite the output CSV before processing.
     """
     if use_threads:
         executor_class = ThreadPoolExecutor
@@ -854,7 +870,7 @@ def multi_processor(
         executor_class = ProcessPoolExecutor
         mp_context = multiprocessing.get_context("spawn")
 
-    if not os.path.exists(output_csv):
+    if overwrite_output or not os.path.exists(output_csv):
         with open(output_csv, "w", encoding="utf-8") as f:
             f.write("storm_date,min,mean,max,x,y\n")
 
@@ -909,6 +925,7 @@ def collect_event_stats(
     use_threads: bool = False,
     with_tb: bool = False,
     use_parallel_processing: bool = True,
+    overwrite_stats: bool = False,
 ):
     """
     Collect statistics for storm events.
@@ -922,6 +939,7 @@ def collect_event_stats(
         use_threads (bool): Whether to use threads instead of processes.
         with_tb (bool): Whether to include traceback in error logs.
         use_parallel_processing (bool): Whether to process storm stats using parallel processing.
+        overwrite_stats (bool): Whether to overwrite storm-stats.csv before processing.
     """
     if not collection_id:
         collection_id = catalog.spm.storm_collection_id(storm_duration)
@@ -952,6 +970,7 @@ def collect_event_stats(
             num_workers=num_workers,
             use_threads=use_threads,
             with_tb=with_tb,
+            overwrite_output=overwrite_stats,
         )
     else:
         logging.info("Processing event stats serially.")
@@ -962,6 +981,7 @@ def collect_event_stats(
             output_csv=output_csv,
             event_dates=event_dates,
             with_tb=with_tb,
+            overwrite_output=overwrite_stats,
         )
 
 
@@ -1065,6 +1085,126 @@ def create_items(
                     logging.error("Error processing: %s", e)
 
     return None
+
+
+def finalize_ranked_collection(
+    storm_catalog: StormCatalog,
+    collection: StormCollection,
+    ranked_storms_output_path: str,
+) -> StormCollection:
+    """Attach ranking summary assets and save a storm collection."""
+    logging.info("Adding summary stats and features to collection.")
+    collection.add_ranked_storms_asset(ranked_storms_output_path, storm_catalog.spm)
+    collection.add_summary_stats(storm_catalog.spm)
+    collection.watershed_centroid_feature_collection(storm_catalog.spm)
+    collection.max_precip_feature_collection(storm_catalog.spm)
+
+    storm_catalog.add_collection_to_catalog(collection, override=True)
+    logging.info("Saving catalog and collection.")
+    storm_catalog.save_catalog()
+    return collection
+
+
+def numeric_item_dirs(collection_dir: str) -> list[str]:
+    """Return rank-addressed item directory names from a collection directory."""
+    if not os.path.exists(collection_dir):
+        return []
+    return sorted(
+        [entry.name for entry in os.scandir(collection_dir) if entry.is_dir() and entry.name.isdigit()],
+        key=lambda item_id: int(item_id),
+    )
+
+
+def quarantine_ranked_item_dirs(collection_dir: str, backup_dir: str = None) -> tuple[str, list[str]]:
+    """Move existing numeric rank item directories to a timestamped backup directory."""
+    item_dirs = numeric_item_dirs(collection_dir)
+    if not item_dirs:
+        return backup_dir, []
+
+    if backup_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = os.path.join(collection_dir, "_ranked_item_backups", timestamp)
+
+    os.makedirs(backup_dir, exist_ok=True)
+    moved = []
+    for item_id in item_dirs:
+        source = os.path.join(collection_dir, item_id)
+        destination = os.path.join(backup_dir, item_id)
+        if os.path.exists(destination):
+            raise FileExistsError(f"Backup destination already exists: {destination}")
+        shutil.move(source, destination)
+        moved.append(item_id)
+
+    logging.info("Quarantined %d ranked item directories to %s", len(moved), backup_dir)
+    return backup_dir, moved
+
+
+def rebuild_ranked_collection_items(
+    catalog: Union[str, StormCatalog],
+    storm_duration: int,
+    min_precip_threshold: float,
+    top_n_events: int,
+    num_workers: int = None,
+    use_threads: bool = False,
+    with_tb: bool = False,
+    backup_existing_items: bool = True,
+    backup_dir: str = None,
+) -> StormCollection:
+    """Rebuild rank-addressed STAC items from an existing storm-stats.csv file.
+
+    This is intended for repairing collections where numbered item folders were
+    created from a stale or smoke-test ranking. Existing numeric item directories
+    are quarantined by default before the correct top-ranked items are generated.
+    """
+    initialize_logger()
+
+    if isinstance(catalog, str):
+        storm_catalog = StormCatalog.from_file(catalog)
+    elif isinstance(catalog, StormCatalog):
+        storm_catalog = catalog
+    else:
+        raise ValueError(f"Catalog must be a path to a catalog file or a StormCatalog object not {type(catalog)}")
+
+    collection_id = storm_catalog.spm.storm_collection_id(storm_duration)
+    collection_dir = storm_catalog.spm.collection_dir(collection_id)
+    stats_csv = os.path.join(collection_dir, "storm-stats.csv")
+    if not os.path.exists(stats_csv):
+        raise FileNotFoundError(f"Storm stats file not found: {stats_csv}")
+
+    logging.info("Re-ranking storm events from %s", stats_csv)
+    analyzer = StormAnalyzer(stats_csv, min_precip_threshold, storm_duration)
+    ranked_data, ranked_storms_output_path = analyzer.rank_and_save(collection_id, storm_catalog.spm)
+
+    top_events = ranked_data[ranked_data["por_rank"] <= top_n_events].copy()
+    if len(top_events) < top_n_events:
+        logging.warning(
+            "Requested top %d events, but only %d events meet the threshold.",
+            top_n_events,
+            len(top_events),
+        )
+
+    existing_rank_dirs = numeric_item_dirs(collection_dir)
+    if existing_rank_dirs:
+        if backup_existing_items:
+            quarantine_ranked_item_dirs(collection_dir, backup_dir=backup_dir)
+        else:
+            raise ValueError(
+                f"Collection '{collection_id}' contains existing ranked item directories. "
+                "Set backup_existing_items=True to quarantine and rebuild them."
+            )
+
+    logging.info("Rebuilding %d ranked items for collection '%s'.", len(top_events), collection_id)
+    create_items(
+        top_events.to_dict(orient="records"),
+        storm_catalog,
+        storm_duration=storm_duration,
+        with_tb=with_tb,
+        num_workers=num_workers,
+        use_threads=use_threads,
+    )
+
+    collection = storm_catalog.new_collection_from_items_on_disk(collection_id)
+    return finalize_ranked_collection(storm_catalog, collection, ranked_storms_output_path)
 
 
 def init_storm_catalog(
@@ -1176,6 +1316,73 @@ def storm_search_results_to_csv_line(storm_search_results: dict) -> str:
     return f"{storm_date},{stats},{centroid.x},{centroid.y}\n"
 
 
+def clean_storm_stats_csv(file_path: str, backup: bool = True) -> dict:
+    """Remove exact duplicate rows from a storm-stats.csv file.
+
+    Exact duplicate rows are safe to remove because they represent the same
+    timestamp, statistics, and transposition centroid written more than once.
+    Duplicate storm_date values with different statistics are preserved and
+    reported so the caller can decide whether a full overwrite rebuild is needed.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Storm stats file not found: {file_path}")
+
+    df = pd.read_csv(file_path)
+    original_rows = len(df)
+    duplicate_rows = int(df.duplicated().sum())
+    duplicate_dates = int(df.duplicated(subset=["storm_date"]).sum()) if "storm_date" in df.columns else 0
+
+    if backup:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = f"{file_path}.{timestamp}.bak"
+        shutil.copy2(file_path, backup_path)
+    else:
+        backup_path = None
+
+    cleaned = df.drop_duplicates().reset_index(drop=True)
+    cleaned.to_csv(file_path, index=False)
+
+    remaining_duplicate_dates = (
+        int(cleaned.duplicated(subset=["storm_date"]).sum()) if "storm_date" in cleaned.columns else 0
+    )
+    result = {
+        "file_path": file_path,
+        "backup_path": backup_path,
+        "original_rows": original_rows,
+        "cleaned_rows": len(cleaned),
+        "removed_rows": original_rows - len(cleaned),
+        "exact_duplicate_rows": duplicate_rows,
+        "duplicate_storm_dates_before": duplicate_dates,
+        "duplicate_storm_dates_after": remaining_duplicate_dates,
+    }
+    logging.info(
+        "Cleaned storm stats CSV %s: removed %d exact duplicates, %d duplicate storm_date values remain.",
+        file_path,
+        result["removed_rows"],
+        remaining_duplicate_dates,
+    )
+    return result
+
+
+def clean_catalog_storm_stats(
+    catalog: Union[str, StormCatalog], storm_durations: list[int], backup: bool = True
+) -> list[dict]:
+    """Clean storm-stats.csv files for multiple storm durations."""
+    if isinstance(catalog, str):
+        storm_catalog = StormCatalog.from_file(catalog)
+    elif isinstance(catalog, StormCatalog):
+        storm_catalog = catalog
+    else:
+        raise ValueError(f"Catalog must be a path to a catalog file or a StormCatalog object not {type(catalog)}")
+
+    results = []
+    for storm_duration in storm_durations:
+        collection_id = storm_catalog.spm.storm_collection_id(storm_duration)
+        stats_csv = os.path.join(storm_catalog.spm.collection_dir(collection_id), "storm-stats.csv")
+        results.append(clean_storm_stats_csv(stats_csv, backup=backup))
+    return results
+
+
 def find_missing_storm_dates(file_path: str, start_date: str, stop_date: str, every_n_hours: int) -> List:
     """
     Find missing storm dates in a CSV file.
@@ -1226,9 +1433,7 @@ def parse_duration_from_id(collection_id: str) -> int:
 
 def get_events_collection(catalog: pystac.Catalog, collection_id: str = None):
     """Find a storm events collection in the given catalog."""
-    event_collections = [
-        collection for collection in catalog.get_all_collections() if "-events" in collection.id
-    ]
+    event_collections = [collection for collection in catalog.get_all_collections() if "-events" in collection.id]
 
     if collection_id is not None:
         for collection in event_collections:
@@ -1248,8 +1453,7 @@ def get_events_collection(catalog: pystac.Catalog, collection_id: str = None):
 
     available_ids = sorted(collection.id for collection in event_collections)
     raise ValueError(
-        f"Multiple events collections found in catalog '{catalog.id}': {available_ids}. "
-        "Specify collection_id."
+        f"Multiple events collections found in catalog '{catalog.id}': {available_ids}. Specify collection_id."
     )
 
 
@@ -1420,10 +1624,7 @@ def dss_product_validation_status(product_result: dict | None, spatial_role: str
 
     statuses = [dss_result.get("status")]
     if spatial_role == "target":
-        statuses.extend(
-            result.get("status")
-            for result in product_result.get("spatial_validation", {}).values()
-        )
+        statuses.extend(result.get("status") for result in product_result.get("spatial_validation", {}).values())
     return "passed" if statuses and all(status == "passed" for status in statuses) else "failed"
 
 
@@ -1437,9 +1638,7 @@ def add_dss_validation_asset(item: pystac.Item, product_result: dict) -> str:
         "item_id": item.id,
         "validated_at": datetime.now(timezone.utc).isoformat(),
         "translation": {
-            key: value
-            for key, value in product_result.items()
-            if key not in {"spatial_validation", "dss_validation"}
+            key: value for key, value in product_result.items() if key not in {"spatial_validation", "dss_validation"}
         },
         "spatial_validation": product_result.get("spatial_validation", {}),
         "dss_validation": product_result.get("dss_validation", {}),
@@ -1494,9 +1693,7 @@ def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> 
                     "spatial_role": spatial_role,
                     "start_datetime": item.properties.get("start_datetime"),
                     "end_datetime": item.properties.get("end_datetime"),
-                    "duration_hours": asset.extra_fields.get(
-                        "stormhub:duration_hours", storm_duration_hours(item)
-                    ),
+                    "duration_hours": asset.extra_fields.get("stormhub:duration_hours", storm_duration_hours(item)),
                     "asset_key": asset_key,
                     "dss_filename": os.path.basename(asset.href),
                     "dss_href": Path(os.path.relpath(absolute_href, start=collection_dir)).as_posix(),
@@ -1599,9 +1796,7 @@ def add_storm_dss_files(
         available_ids = {item.id for item in items}
         missing_ids = requested_ids - available_ids
         if missing_ids:
-            raise ValueError(
-                f"Could not find item IDs {sorted(missing_ids)} in collection '{events_collection.id}'."
-            )
+            raise ValueError(f"Could not find item IDs {sorted(missing_ids)} in collection '{events_collection.id}'.")
         items = [item for item in items if item.id in requested_ids]
 
     if aoi_name is None:
@@ -1718,13 +1913,10 @@ def add_storm_dss_files(
             item.save_object(include_self_link=False)
             item_result = {
                 "item_id": item.id,
-                "asset_hrefs": {
-                    mode: item.assets[f"dss-{mode}"].href for mode in modes
-                },
+                "asset_hrefs": {mode: item.assets[f"dss-{mode}"].href for mode in modes},
+                "checksums": {mode: item.assets[f"dss-{mode}"].extra_fields["file:checksum"] for mode in modes},
                 "validation_status": {
-                    mode: item.assets[f"dss-{mode}"].extra_fields.get(
-                        "stormhub:validation_status", "not_run"
-                    )
+                    mode: item.assets[f"dss-{mode}"].extra_fields.get("stormhub:validation_status", "not_run")
                     for mode in modes
                 },
             }
@@ -2040,6 +2232,7 @@ def new_collection(
     use_threads: bool = False,
     with_tb: bool = False,
     create_new_items: bool = True,
+    overwrite_stats: bool = False,
 ):
     """
     Create a new storm collection.
@@ -2057,6 +2250,7 @@ def new_collection(
         use_threads (bool): Whether to use threads instead of processes.
         with_tb (bool): Whether to include traceback in error logs.
         create_new_items (bool): Create items (or skip if items exist)
+        overwrite_stats (bool): Overwrite storm-stats.csv before collecting event stats.
     """
     initialize_logger()
 
@@ -2097,6 +2291,7 @@ def new_collection(
             num_workers=num_workers,
             with_tb=with_tb,
             use_threads=use_threads,
+            overwrite_stats=overwrite_stats,
         )
     stats_csv = os.path.join(storm_catalog.spm.collection_dir(collection_id), "storm-stats.csv")
     try:

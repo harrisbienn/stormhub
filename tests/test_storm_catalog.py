@@ -8,7 +8,15 @@ from pathlib import Path
 import pystac
 import pytest
 
-from stormhub.met.storm_catalog import add_storm_dss_files, get_events_collection, storm_dss_filename
+from stormhub.met.storm_catalog import (
+    add_storm_dss_files,
+    clean_storm_stats_csv,
+    get_events_collection,
+    numeric_item_dirs,
+    quarantine_ranked_item_dirs,
+    storm_dss_filename,
+)
+from stormhub.utils import sha256_file, sha256_multihash
 
 WINDOWS_DRIVE_HREF = re.compile(r"^[A-Za-z]:[/\\]")
 
@@ -80,6 +88,63 @@ def test_storm_dss_filename_includes_event_identity() -> None:
     assert storm_dss_filename(item, output_resolution_km=1) == "r007_20200102T0600_24h_aorc_shg1k_source.dss"
 
 
+def test_quarantine_ranked_item_dirs_moves_only_numeric_rank_dirs(tmp_path) -> None:
+    """Move stale rank-addressed item dirs while preserving collection assets."""
+    collection_dir = tmp_path / "24hr-events"
+    collection_dir.mkdir()
+    for name in ["1", "2", "10", "dss", "_ranked_item_backups"]:
+        (collection_dir / name).mkdir()
+    (collection_dir / "1" / "1.json").write_text("{}", encoding="utf-8")
+
+    backup_dir, moved = quarantine_ranked_item_dirs(str(collection_dir))
+
+    assert moved == ["1", "2", "10"]
+    assert numeric_item_dirs(str(collection_dir)) == []
+    assert Path(backup_dir, "1", "1.json").exists()
+    assert (collection_dir / "dss").exists()
+    assert (collection_dir / "_ranked_item_backups").exists()
+
+
+def test_quarantine_ranked_item_dirs_raises_for_existing_backup_destination(tmp_path) -> None:
+    """Avoid overwriting a previous quarantine backup."""
+    collection_dir = tmp_path / "24hr-events"
+    backup_dir = tmp_path / "backup"
+    (collection_dir / "1").mkdir(parents=True)
+    (backup_dir / "1").mkdir(parents=True)
+
+    with pytest.raises(FileExistsError, match="Backup destination already exists"):
+        quarantine_ranked_item_dirs(str(collection_dir), backup_dir=str(backup_dir))
+
+
+def test_clean_storm_stats_csv_removes_exact_duplicates_only(tmp_path) -> None:
+    """Clean repeated writes without hiding conflicting duplicate dates."""
+    stats_csv = tmp_path / "storm-stats.csv"
+    stats_csv.write_text(
+        "\n".join(
+            [
+                "storm_date,min,mean,max,x,y",
+                "2016-01-01T00,1,2,3,-90,30",
+                "2016-01-01T00,1,2,3,-90,30",
+                "2016-01-01T00,1,2.5,3,-90,30",
+                "2016-01-01T06,1,2,3,-91,31",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = clean_storm_stats_csv(str(stats_csv), backup=True)
+
+    assert result["original_rows"] == 4
+    assert result["cleaned_rows"] == 3
+    assert result["removed_rows"] == 1
+    assert result["duplicate_storm_dates_after"] == 1
+    assert result["backup_path"] is not None
+    assert Path(result["backup_path"]).exists()
+    cleaned_text = stats_csv.read_text(encoding="utf-8")
+    assert cleaned_text.count("2016-01-01T00") == 2
+
+
 def make_dss_catalog(root: Path) -> pystac.Catalog:
     """Create a saved storm catalog suitable for DSS export tests."""
     catalog = make_catalog("24hr-events")
@@ -90,9 +155,7 @@ def make_dss_catalog(root: Path) -> pystac.Catalog:
             geometry={"type": "Point", "coordinates": [0.5, 0.5]},
             bbox=[0.5, 0.5, 0.5, 0.5],
             datetime=None,
-            properties={
-                "aorc:transform": {"a": 1.0, "b": 0.0, "c": 0.25, "d": 0.0, "e": 1.0, "f": 0.25}
-            },
+            properties={"aorc:transform": {"a": 1.0, "b": 0.0, "c": 0.25, "d": 0.0, "e": 1.0, "f": 0.25}},
             start_datetime=datetime(2020, 1, 2, tzinfo=timezone.utc),
             end_datetime=datetime(2020, 1, 3, tzinfo=timezone.utc),
         )
