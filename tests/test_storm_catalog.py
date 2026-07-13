@@ -11,8 +11,10 @@ import pytest
 from stormhub.met.storm_catalog import (
     add_storm_dss_files,
     clean_storm_stats_csv,
+    find_orphaned_dss_files,
     get_events_collection,
     numeric_item_dirs,
+    quarantine_orphaned_dss_files,
     quarantine_ranked_item_dirs,
     storm_dss_filename,
 )
@@ -143,6 +145,53 @@ def test_clean_storm_stats_csv_removes_exact_duplicates_only(tmp_path) -> None:
     assert Path(result["backup_path"]).exists()
     cleaned_text = stats_csv.read_text(encoding="utf-8")
     assert cleaned_text.count("2016-01-01T00") == 2
+
+
+def test_find_orphaned_dss_files_uses_manifest_as_authority(tmp_path) -> None:
+    """Identify DSS files that are present on disk but absent from the manifest."""
+    dss_dir = tmp_path / "dss"
+    dss_dir.mkdir()
+    manifest = dss_dir / "dss-manifest.csv"
+    manifest.write_text(
+        "item_id,asset_key,dss_filename\n1,dss-source,r001_current_source.dss\n1,dss-target,r001_current_target.dss\n",
+        encoding="utf-8",
+    )
+    for name in [
+        "r001_current_source.dss",
+        "r001_current_target.dss",
+        "r001_old_source.dss",
+        "readme.txt",
+    ]:
+        (dss_dir / name).write_text("test", encoding="utf-8")
+
+    orphaned = find_orphaned_dss_files(str(manifest))
+
+    assert [Path(path).name for path in orphaned] == ["r001_old_source.dss"]
+
+
+def test_quarantine_orphaned_dss_files_moves_only_orphans(tmp_path) -> None:
+    """Move orphaned DSS files into a backup folder while leaving manifest files."""
+    dss_dir = tmp_path / "dss"
+    backup_dir = tmp_path / "backup"
+    dss_dir.mkdir()
+    manifest = dss_dir / "dss-manifest.csv"
+    manifest.write_text(
+        "item_id,asset_key,dss_filename\n1,dss-source,r001_current_source.dss\n",
+        encoding="utf-8",
+    )
+    (dss_dir / "r001_current_source.dss").write_text("current", encoding="utf-8")
+    (dss_dir / "r001_old_source.dss").write_text("old", encoding="utf-8")
+
+    dry_run = quarantine_orphaned_dss_files(str(manifest), backup_dir=str(backup_dir), dry_run=True)
+    applied = quarantine_orphaned_dss_files(str(manifest), backup_dir=str(backup_dir), dry_run=False)
+
+    assert dry_run["orphaned_count"] == 1
+    assert dry_run["moved_count"] == 0
+    assert applied["orphaned_count"] == 1
+    assert applied["moved_count"] == 1
+    assert (dss_dir / "r001_current_source.dss").exists()
+    assert not (dss_dir / "r001_old_source.dss").exists()
+    assert (backup_dir / "r001_old_source.dss").exists()
 
 
 def make_dss_catalog(root: Path) -> pystac.Catalog:

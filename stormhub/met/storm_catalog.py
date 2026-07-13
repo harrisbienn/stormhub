@@ -1740,6 +1740,90 @@ def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> 
     return manifest_path
 
 
+def find_orphaned_dss_files(manifest_path: str, dss_dir: str = None) -> list[str]:
+    """Return DSS files in a folder that are not referenced by a DSS manifest."""
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(f"DSS manifest not found: {manifest_path}")
+
+    if dss_dir is None:
+        dss_dir = os.path.dirname(manifest_path)
+    if not os.path.exists(dss_dir):
+        raise FileNotFoundError(f"DSS directory not found: {dss_dir}")
+
+    manifest = pd.read_csv(manifest_path)
+    if "dss_filename" not in manifest.columns:
+        raise ValueError(f"DSS manifest must contain a 'dss_filename' column: {manifest_path}")
+
+    referenced_filenames = set(manifest["dss_filename"].dropna().astype(str))
+    orphaned_files = [
+        os.path.join(dss_dir, filename)
+        for filename in os.listdir(dss_dir)
+        if filename.endswith(".dss") and filename not in referenced_filenames
+    ]
+    return sorted(orphaned_files)
+
+
+def quarantine_orphaned_dss_files(
+    manifest_path: str,
+    dss_dir: str = None,
+    backup_dir: str = None,
+    dry_run: bool = True,
+) -> dict:
+    """Move DSS files not referenced by the current manifest to a backup folder."""
+    if dss_dir is None:
+        dss_dir = os.path.dirname(manifest_path)
+
+    orphaned_files = find_orphaned_dss_files(manifest_path, dss_dir=dss_dir)
+    if backup_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = os.path.join(dss_dir, "_orphaned_dss_backups", timestamp)
+
+    moved_files = []
+    if orphaned_files and not dry_run:
+        os.makedirs(backup_dir, exist_ok=True)
+        for source in orphaned_files:
+            destination = os.path.join(backup_dir, os.path.basename(source))
+            if os.path.exists(destination):
+                raise FileExistsError(f"Backup destination already exists: {destination}")
+            shutil.move(source, destination)
+            moved_files.append(destination)
+
+    return {
+        "manifest_path": os.path.abspath(manifest_path),
+        "dss_dir": os.path.abspath(dss_dir),
+        "backup_dir": os.path.abspath(backup_dir),
+        "dry_run": dry_run,
+        "orphaned_count": len(orphaned_files),
+        "moved_count": len(moved_files),
+        "orphaned_files": [os.path.abspath(path) for path in orphaned_files],
+        "moved_files": [os.path.abspath(path) for path in moved_files],
+    }
+
+
+def quarantine_catalog_orphaned_dss_files(
+    catalog: Union[str, StormCatalog],
+    storm_durations: list[int],
+    dry_run: bool = True,
+) -> list[dict]:
+    """Quarantine orphaned DSS files for multiple storm event collections."""
+    if isinstance(catalog, str):
+        storm_catalog = StormCatalog.from_file(catalog)
+    elif isinstance(catalog, StormCatalog):
+        storm_catalog = catalog
+    else:
+        raise ValueError(f"Catalog must be a path to a catalog file or a StormCatalog object not {type(catalog)}")
+
+    results = []
+    for storm_duration in storm_durations:
+        collection_id = storm_catalog.spm.storm_collection_id(storm_duration)
+        dss_dir = os.path.join(storm_catalog.spm.collection_dir(collection_id), "dss")
+        manifest_path = os.path.join(dss_dir, "dss-manifest.csv")
+        result = quarantine_orphaned_dss_files(manifest_path, dss_dir=dss_dir, dry_run=dry_run)
+        result["collection_id"] = collection_id
+        results.append(result)
+    return results
+
+
 def add_storm_dss_files(
     catalog: pystac.catalog,
     aoi_name: str = None,
