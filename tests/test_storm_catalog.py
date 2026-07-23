@@ -290,6 +290,10 @@ def test_add_storm_dss_files_writes_portable_assets_and_manifest(tmp_path, monke
     assert source_asset.extra_fields["stormhub:spatial_role"] == "source"
     assert source_asset.extra_fields["stormhub:translation_method"] == "none"
     assert source_asset.extra_fields["proj:code"] == "EPSG:5070"
+    expected_checksum = sha256_multihash(sha256_file(dss_dir / source_asset.title))
+    assert source_asset.extra_fields["file:checksum"] == expected_checksum
+    assert result["successful_items"][0]["checksums"]["source"] == expected_checksum
+    assert "https://stac-extensions.github.io/file/" in " ".join(saved_item.stac_extensions)
 
     saved_collection = pystac.Collection.from_file(str(tmp_path / "24hr-events" / "collection.json"))
     assert saved_collection.assets["dss_manifest"].href == "dss/dss-manifest.csv"
@@ -363,6 +367,7 @@ def test_add_storm_dss_files_records_target_translation(tmp_path, monkeypatch) -
     assert target_asset.extra_fields["stormhub:x_offset_m"] == -5000
     assert target_asset.extra_fields["stormhub:y_offset_cells"] == -12
     assert target_asset.extra_fields["stormhub:validation_status"] == "passed"
+    assert target_asset.extra_fields["file:checksum"].startswith("1220")
     assert target_asset.extra_fields["proj:shape"] == [100, 120]
     assert saved_item.assets["dss-validation"].href == "1.dss-validation.json"
     validation_path = tmp_path / "24hr-events" / "1" / "1.dss-validation.json"

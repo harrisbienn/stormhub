@@ -37,7 +37,8 @@ dependencies = [
     "scipy==1.15.2",
     "dataretrieval==1.0.11",
     "stac-geoparquet==0.7.0",
-    "hecdss==0.1.29"
+    "hecdss==0.1.29",
+    "pydantic==2.13.4"
 
 ]
 
@@ -76,6 +77,9 @@ include = ["stormhub*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "stormhub.__version__"}
+
+[tool.setuptools.package-data]
+"stormhub.scenarios" = ["schemas/*.json"]
 
 [tool.sphinx]
 project = "stormhub"

@@ -24,6 +24,7 @@ import geopandas as gpd
 
 import matplotlib
 import zarr
+from pystac.extensions.file import FileExtension
 from stormhub.hydro_domain import HydroDomain
 from stormhub.logger import initialize_logger
 from stormhub.met.analysis import StormAnalyzer
@@ -40,6 +41,8 @@ from stormhub.utils import (
     STORMHUB_REF_LINK,
     StacPathManager,
     generate_date_range,
+    sha256_file,
+    sha256_multihash,
     validate_config,
 )
 
@@ -1547,6 +1550,7 @@ def source_dss_metadata(
     validation_status: str = "not_run",
 ) -> dict:
     """Build metadata that identifies a source-location DSS asset."""
+    checksum = sha256_file(dss_output_path)
     return {
         "stormhub:spatial_role": "source",
         "stormhub:data_source": "AORC",
@@ -1559,6 +1563,7 @@ def source_dss_metadata(
         "stormhub:translation_method": "none",
         "stormhub:validation_status": validation_status,
         "file:size": os.path.getsize(dss_output_path),
+        "file:checksum": sha256_multihash(checksum),
         "proj:code": "EPSG:5070",
     }
 
@@ -1574,6 +1579,7 @@ def target_dss_metadata(
     validation_status: str = "not_run",
 ) -> dict:
     """Build metadata that identifies a target-transposed DSS asset."""
+    checksum = sha256_file(dss_output_path)
     metadata = {
         "stormhub:spatial_role": "target",
         "stormhub:data_source": "AORC",
@@ -1601,6 +1607,7 @@ def target_dss_metadata(
         "stormhub:y_snap_residual_m": translation["y_snap_residual_m"],
         "stormhub:validation_status": validation_status,
         "file:size": os.path.getsize(dss_output_path),
+        "file:checksum": sha256_multihash(checksum),
         "proj:code": "EPSG:5070",
     }
     spatial_results = translation.get("spatial_validation", {})
@@ -1697,6 +1704,7 @@ def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> 
                     "asset_key": asset_key,
                     "dss_filename": os.path.basename(asset.href),
                     "dss_href": Path(os.path.relpath(absolute_href, start=collection_dir)).as_posix(),
+                    "checksum": asset.extra_fields.get("file:checksum"),
                     "target_watershed_id": asset.extra_fields.get("stormhub:target_watershed_id"),
                     "x_offset_m": asset.extra_fields.get("stormhub:x_offset_m"),
                     "y_offset_m": asset.extra_fields.get("stormhub:y_offset_m"),
@@ -1716,6 +1724,7 @@ def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> 
         "asset_key",
         "dss_filename",
         "dss_href",
+        "checksum",
         "target_watershed_id",
         "x_offset_m",
         "y_offset_m",
@@ -1855,6 +1864,7 @@ def add_storm_dss_files(
     dict
         JSON-serializable run summary containing counts, per-item asset and
         validation details, failures, and the collection manifest path.
+        Successful item entries and DSS STAC Assets include SHA-256 multihashes.
 
     """
     if isinstance(catalog, str):
@@ -1951,6 +1961,7 @@ def add_storm_dss_files(
                 if asset.media_type == "application/x-dss" and dss_spatial_role(asset_key, asset) in modes:
                     item.assets.pop(asset_key)
 
+            FileExtension.add_to(item)
             if "source" in modes:
                 source_path = output_paths["source"]
                 item.add_asset(

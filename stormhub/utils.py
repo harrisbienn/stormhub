@@ -1,5 +1,6 @@
 """Utility functions for stormhub."""
 
+import hashlib
 import json
 import logging
 import socket
@@ -17,6 +18,38 @@ STORMHUB_REF_LINK = Link(
     media_type="text/html",
     extra_fields={"Description": "Source code used to generate STAC objects"},
 )
+
+SHA256_MULTIHASH_PREFIX = "1220"
+
+
+def sha256_file(path: str | os.PathLike, chunk_size: int = 1024 * 1024) -> str:
+    """Return the lowercase SHA-256 digest of a file without loading it all into memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_multihash(sha256: str) -> str:
+    """Encode a hexadecimal SHA-256 digest using the STAC File extension multihash form."""
+    if len(sha256) != 64 or any(character not in "0123456789abcdef" for character in sha256):
+        raise ValueError("sha256 must be a 64-character lowercase hexadecimal digest")
+    return f"{SHA256_MULTIHASH_PREFIX}{sha256}"
+
+
+def sha256_from_checksum(checksum: str | None) -> str | None:
+    """Extract a SHA-256 digest from common STAC checksum representations."""
+    if checksum is None:
+        return None
+    normalized = checksum.lower()
+    if normalized.startswith(SHA256_MULTIHASH_PREFIX) and len(normalized) == 68:
+        normalized = normalized[len(SHA256_MULTIHASH_PREFIX) :]
+    elif normalized.startswith("sha256:"):
+        normalized = normalized.removeprefix("sha256:")
+    if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+        raise ValueError(f"Unsupported checksum representation: {checksum}")
+    return normalized
 
 
 def is_port_in_use(port: int = 8080, host: str = "http://localhost") -> bool:

@@ -1,0 +1,655 @@
+{
+  "$defs": {
+    "AntecedentConditions": {
+      "additionalProperties": false,
+      "description": "Optional hydrologic state applied before the precipitation event.",
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "title": "As Of",
+          "type": "string"
+        },
+        "condition_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Condition Id",
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "title": "Parameters",
+          "type": "object"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/StacAssetReference"
+          },
+          "title": "Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "condition_id",
+        "as_of"
+      ],
+      "title": "AntecedentConditions",
+      "type": "object"
+    },
+    "ExecutionSpec": {
+      "additionalProperties": false,
+      "description": "Runner configuration that can affect hydraulic results.",
+      "properties": {
+        "command": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Command",
+          "type": "array"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "title": "Parameters",
+          "type": "object"
+        },
+        "runner": {
+          "minLength": 1,
+          "title": "Runner",
+          "type": "string"
+        },
+        "software": {
+          "$ref": "#/$defs/SoftwareProvenance"
+        }
+      },
+      "required": [
+        "runner",
+        "software"
+      ],
+      "title": "ExecutionSpec",
+      "type": "object"
+    },
+    "FailureDetails": {
+      "additionalProperties": false,
+      "description": "Machine-readable failure information for retry decisions.",
+      "properties": {
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "error_type": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Error Type",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "error_type",
+        "message"
+      ],
+      "title": "FailureDetails",
+      "type": "object"
+    },
+    "FileReference": {
+      "additionalProperties": false,
+      "description": "Content-addressed reference to a run input or output file.",
+      "properties": {
+        "asset_key": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Asset Key",
+          "type": "string"
+        },
+        "href": {
+          "minLength": 1,
+          "title": "Href",
+          "type": "string"
+        },
+        "kind": {
+          "const": "file",
+          "default": "file",
+          "title": "Kind",
+          "type": "string"
+        },
+        "media_type": {
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "roles": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Roles",
+          "type": "array"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        }
+      },
+      "required": [
+        "asset_key",
+        "href",
+        "media_type",
+        "roles",
+        "sha256",
+        "size_bytes"
+      ],
+      "title": "FileReference",
+      "type": "object"
+    },
+    "HydraulicModel": {
+      "additionalProperties": false,
+      "description": "Versioned hydraulic model package and selected plan.",
+      "properties": {
+        "engine": {
+          "default": "HEC-RAS",
+          "minLength": 1,
+          "title": "Engine",
+          "type": "string"
+        },
+        "engine_version": {
+          "minLength": 1,
+          "title": "Engine Version",
+          "type": "string"
+        },
+        "model_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_version": {
+          "minLength": 1,
+          "title": "Model Version",
+          "type": "string"
+        },
+        "package": {
+          "$ref": "#/$defs/FileReference"
+        },
+        "plan_name": {
+          "minLength": 1,
+          "title": "Plan Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "model_version",
+        "engine_version",
+        "plan_name",
+        "package"
+      ],
+      "title": "HydraulicModel",
+      "type": "object"
+    },
+    "PrecipitationInput": {
+      "additionalProperties": false,
+      "description": "Source and watershed-transposed precipitation for the run.",
+      "properties": {
+        "duration_hours": {
+          "exclusiveMinimum": 0,
+          "title": "Duration Hours",
+          "type": "integer"
+        },
+        "event_end": {
+          "format": "date-time",
+          "title": "Event End",
+          "type": "string"
+        },
+        "event_start": {
+          "format": "date-time",
+          "title": "Event Start",
+          "type": "string"
+        },
+        "rank": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rank"
+        },
+        "source_aorc": {
+          "$ref": "#/$defs/StacAssetReference"
+        },
+        "transposed_dss": {
+          "$ref": "#/$defs/StacAssetReference"
+        }
+      },
+      "required": [
+        "source_aorc",
+        "transposed_dss",
+        "event_start",
+        "event_end",
+        "duration_hours"
+      ],
+      "title": "PrecipitationInput",
+      "type": "object"
+    },
+    "QualityCheck": {
+      "additionalProperties": false,
+      "description": "One named validation performed on inputs, execution, or outputs.",
+      "properties": {
+        "message": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "metrics": {
+          "additionalProperties": true,
+          "title": "Metrics",
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/QualityStatus"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "title": "QualityCheck",
+      "type": "object"
+    },
+    "QualityStatus": {
+      "description": "Aggregate or individual quality-control result.",
+      "enum": [
+        "not_run",
+        "passed",
+        "warning",
+        "failed"
+      ],
+      "title": "QualityStatus",
+      "type": "string"
+    },
+    "QualitySummary": {
+      "additionalProperties": false,
+      "description": "Aggregate quality state and its supporting checks.",
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/QualityCheck"
+          },
+          "title": "Checks",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/QualityStatus",
+          "default": "not_run"
+        }
+      },
+      "title": "QualitySummary",
+      "type": "object"
+    },
+    "RunStatus": {
+      "description": "Lifecycle states for one hydraulic model execution.",
+      "enum": [
+        "planned",
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "ScenarioRunSpec": {
+      "additionalProperties": false,
+      "description": "Immutable, result-defining inputs for one hydraulic execution.",
+      "properties": {
+        "antecedent_conditions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AntecedentConditions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "execution": {
+          "$ref": "#/$defs/ExecutionSpec"
+        },
+        "hydraulic_model": {
+          "$ref": "#/$defs/HydraulicModel"
+        },
+        "precipitation": {
+          "$ref": "#/$defs/PrecipitationInput"
+        },
+        "watershed": {
+          "$ref": "#/$defs/WatershedReference"
+        }
+      },
+      "required": [
+        "watershed",
+        "precipitation",
+        "hydraulic_model",
+        "execution"
+      ],
+      "title": "ScenarioRunSpec",
+      "type": "object"
+    },
+    "SoftwareProvenance": {
+      "additionalProperties": false,
+      "description": "Code and runtime identity used to execute a scenario.",
+      "properties": {
+        "container_digest": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container Digest"
+        },
+        "container_image": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container Image"
+        },
+        "dirty": {
+          "default": false,
+          "title": "Dirty",
+          "type": "boolean"
+        },
+        "operating_system": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operating System"
+        },
+        "python_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Python Version"
+        },
+        "repository": {
+          "minLength": 1,
+          "title": "Repository",
+          "type": "string"
+        },
+        "revision": {
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "revision"
+      ],
+      "title": "SoftwareProvenance",
+      "type": "object"
+    },
+    "StacAssetReference": {
+      "additionalProperties": false,
+      "description": "Stable reference to one asset on one STAC Item.",
+      "properties": {
+        "asset_href": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Href"
+        },
+        "asset_key": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Asset Key",
+          "type": "string"
+        },
+        "collection_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Collection Id",
+          "type": "string"
+        },
+        "item_href": {
+          "minLength": 1,
+          "title": "Item Href",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "stac_asset",
+          "default": "stac_asset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        }
+      },
+      "required": [
+        "item_href",
+        "collection_id",
+        "item_id",
+        "asset_key"
+      ],
+      "title": "StacAssetReference",
+      "type": "object"
+    },
+    "WatershedReference": {
+      "additionalProperties": false,
+      "description": "Target watershed used by both precipitation and hydraulic processing.",
+      "properties": {
+        "geometry_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Geometry Sha256",
+          "type": "string"
+        },
+        "item_href": {
+          "minLength": 1,
+          "title": "Item Href",
+          "type": "string"
+        },
+        "watershed_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Watershed Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "watershed_id",
+        "item_href",
+        "geometry_sha256"
+      ],
+      "title": "WatershedReference",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned manifest for one planned or completed scenario run.",
+  "properties": {
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "contract_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "failure": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FailureDetails"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "labels": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Labels",
+      "type": "object"
+    },
+    "outputs": {
+      "items": {
+        "$ref": "#/$defs/FileReference"
+      },
+      "title": "Outputs",
+      "type": "array"
+    },
+    "quality": {
+      "$ref": "#/$defs/QualitySummary"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "spec": {
+      "$ref": "#/$defs/ScenarioRunSpec"
+    },
+    "specification_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Specification Sha256",
+      "type": "string"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Started At"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus",
+      "default": "planned"
+    }
+  },
+  "required": [
+    "run_id",
+    "specification_sha256",
+    "spec",
+    "created_at"
+  ],
+  "title": "ScenarioRun",
+  "type": "object"
+}
