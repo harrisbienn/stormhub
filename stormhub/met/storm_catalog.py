@@ -6,7 +6,7 @@ import multiprocessing
 import os
 import traceback
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Union, Dict
 from pathlib import Path
 import gc
@@ -16,6 +16,7 @@ import pandas as pd
 import pystac
 from pystac import Asset, Collection, Item, Link, MediaType, Catalog
 import stac_geoparquet
+from shapely.affinity import affine_transform
 from shapely.geometry import mapping, shape, Point
 import xarray as xr
 import geopandas as gpd
@@ -30,6 +31,7 @@ from stormhub.met.zarr_to_dss import (
     get_aorc_paths,
     get_s3_zarr_data,
     noaa_zarr_to_dss,
+    noaa_zarr_to_dss_products,
     NOAADataVariable,
     save_da_as_geotiff,
 )
@@ -1219,13 +1221,33 @@ def parse_duration_from_id(collection_id: str) -> int:
         return None
 
 
-def get_events_collection(catalog: pystac.Catalog):
-    """Find storm events collection from given Catalog."""
-    for collection in catalog.get_all_collections():
-        if "-events" in collection.id:
-            return collection
+def get_events_collection(catalog: pystac.Catalog, collection_id: str = None):
+    """Find a storm events collection in the given catalog."""
+    event_collections = [
+        collection for collection in catalog.get_all_collections() if "-events" in collection.id
+    ]
 
+    if collection_id is not None:
+        for collection in event_collections:
+            if collection.id == collection_id:
+                return collection
+
+        available_ids = sorted(collection.id for collection in event_collections)
+        raise ValueError(
+            f"Could not find events collection '{collection_id}' in catalog '{catalog.id}'. "
+            f"Available events collections: {available_ids}."
+        )
+
+    if len(event_collections) == 1:
+        return event_collections[0]
+    if not event_collections:
         raise ValueError(f"Could not find events collection in catalog: {catalog.id}.")
+
+    available_ids = sorted(collection.id for collection in event_collections)
+    raise ValueError(
+        f"Multiple events collections found in catalog '{catalog.id}': {available_ids}. "
+        "Specify collection_id."
+    )
 
 
 def get_transposition_item(catalog: pystac.Catalog, use_valid_region: bool = False):
@@ -1240,6 +1262,284 @@ def get_transposition_item(catalog: pystac.Catalog, use_valid_region: bool = Fal
     raise ValueError(f"Could not find transposition region item in catalog: {catalog.id}.")
 
 
+def get_watershed_item(catalog: pystac.Catalog) -> pystac.Item:
+    """Find the modeling watershed item in a storm catalog."""
+    for item in catalog.get_all_items():
+        if item.properties.get("hydro_domain:type") == "watershed":
+            return item
+    raise ValueError(f"Could not find watershed item in catalog: {catalog.id}.")
+
+
+def source_watershed_geometry(item: pystac.Item, target_geometry):
+    """Reconstruct an event's source watershed geometry from its stored transform."""
+    transform = item.properties.get("aorc:transform")
+    required_keys = ("a", "b", "c", "d", "e", "f")
+    if not transform or any(key not in transform for key in required_keys):
+        raise ValueError(f"Storm item '{item.id}' does not contain a complete aorc:transform.")
+    return affine_transform(
+        target_geometry,
+        [
+            transform["a"],
+            transform["b"],
+            transform["d"],
+            transform["e"],
+            transform["c"],
+            transform["f"],
+        ],
+    )
+
+
+def storm_duration_hours(item: pystac.Item) -> float:
+    """Return the event duration represented by a STAC item."""
+    start_date = datetime.strptime(item.properties["start_datetime"], "%Y-%m-%dT%H:%M:%SZ")
+    end_date = datetime.strptime(item.properties["end_datetime"], "%Y-%m-%dT%H:%M:%SZ")
+    return (end_date - start_date).total_seconds() / 3600
+
+
+def storm_dss_filename(
+    item: pystac.Item,
+    output_resolution_km: int = 1,
+    spatial_role: str = "source",
+) -> str:
+    """Build a stable DSS filename from event metadata."""
+    if spatial_role not in {"source", "target"}:
+        raise ValueError(f"DSS spatial role must be 'source' or 'target', not '{spatial_role}'.")
+
+    start_date = datetime.strptime(item.properties["start_datetime"], "%Y-%m-%dT%H:%M:%SZ")
+    duration_hours = storm_duration_hours(item)
+    duration_token = f"{duration_hours:g}".replace(".", "p")
+    resolution_token = f"{output_resolution_km:g}".replace(".", "p")
+
+    try:
+        rank_token = f"r{int(item.id):03d}"
+    except ValueError:
+        safe_item_id = re.sub(r"[^A-Za-z0-9_-]+", "-", item.id).strip("-")
+        rank_token = safe_item_id or "event"
+
+    return (
+        f"{rank_token}_{start_date.strftime('%Y%m%dT%H%M')}_"
+        f"{duration_token}h_aorc_shg{resolution_token}k_{spatial_role}.dss"
+    )
+
+
+def dss_spatial_role(asset_key: str, asset: pystac.Asset) -> str:
+    """Return the source or target role recorded for a DSS asset."""
+    role = asset.extra_fields.get("stormhub:spatial_role")
+    if role in {"source", "target"}:
+        return role
+    if "target" in (asset.roles or []) or asset_key.endswith("target"):
+        return "target"
+    return "source"
+
+
+def source_dss_metadata(
+    item: pystac.Item,
+    source_domain_id: str,
+    output_resolution_km: int,
+    dss_output_path: str,
+    validation_status: str = "not_run",
+) -> dict:
+    """Build metadata that identifies a source-location DSS asset."""
+    return {
+        "stormhub:spatial_role": "source",
+        "stormhub:data_source": "AORC",
+        "stormhub:source_domain_id": source_domain_id,
+        "stormhub:duration_hours": storm_duration_hours(item),
+        "stormhub:time_step": "PT1H",
+        "stormhub:time_zone": "UTC",
+        "stormhub:output_crs": "EPSG:5070",
+        "stormhub:output_resolution_m": output_resolution_km * 1000,
+        "stormhub:translation_method": "none",
+        "stormhub:validation_status": validation_status,
+        "file:size": os.path.getsize(dss_output_path),
+        "proj:code": "EPSG:5070",
+    }
+
+
+def target_dss_metadata(
+    item: pystac.Item,
+    source_domain_id: str,
+    target_watershed_id: str,
+    output_resolution_km: int,
+    target_buffer_km: float,
+    dss_output_path: str,
+    translation: dict,
+    validation_status: str = "not_run",
+) -> dict:
+    """Build metadata that identifies a target-transposed DSS asset."""
+    metadata = {
+        "stormhub:spatial_role": "target",
+        "stormhub:data_source": "AORC",
+        "stormhub:source_domain_id": source_domain_id,
+        "stormhub:target_watershed_id": target_watershed_id,
+        "stormhub:duration_hours": storm_duration_hours(item),
+        "stormhub:time_step": "PT1H",
+        "stormhub:time_zone": "UTC",
+        "stormhub:output_crs": "EPSG:5070",
+        "stormhub:output_resolution_m": output_resolution_km * 1000,
+        "stormhub:target_buffer_km": target_buffer_km,
+        "stormhub:translation_method": translation["method"],
+        "stormhub:translation_direction": translation["direction"],
+        "stormhub:source_center_x": translation["source_center_x"],
+        "stormhub:source_center_y": translation["source_center_y"],
+        "stormhub:target_center_x": translation["target_center_x"],
+        "stormhub:target_center_y": translation["target_center_y"],
+        "stormhub:raw_x_offset_m": translation["raw_x_offset_m"],
+        "stormhub:raw_y_offset_m": translation["raw_y_offset_m"],
+        "stormhub:x_offset_m": translation["x_offset_m"],
+        "stormhub:y_offset_m": translation["y_offset_m"],
+        "stormhub:x_offset_cells": translation["x_offset_cells"],
+        "stormhub:y_offset_cells": translation["y_offset_cells"],
+        "stormhub:x_snap_residual_m": translation["x_snap_residual_m"],
+        "stormhub:y_snap_residual_m": translation["y_snap_residual_m"],
+        "stormhub:validation_status": validation_status,
+        "file:size": os.path.getsize(dss_output_path),
+        "proj:code": "EPSG:5070",
+    }
+    spatial_results = translation.get("spatial_validation", {})
+    if spatial_results:
+        first_result = next(iter(spatial_results.values()))
+        metadata["proj:shape"] = [
+            first_result["target_rows"],
+            first_result["target_columns"],
+        ]
+        metadata["proj:bbox"] = first_result["target_bounds"]
+    return metadata
+
+
+def dss_product_validation_status(product_result: dict | None, spatial_role: str) -> str:
+    """Summarize DSS readback and target spatial validation for one product."""
+    if not product_result:
+        return "not_run"
+    dss_result = product_result.get("dss_validation", {}).get(spatial_role)
+    if not dss_result:
+        return "not_run"
+
+    statuses = [dss_result.get("status")]
+    if spatial_role == "target":
+        statuses.extend(
+            result.get("status")
+            for result in product_result.get("spatial_validation", {}).values()
+        )
+    return "passed" if statuses and all(status == "passed" for status in statuses) else "failed"
+
+
+def add_dss_validation_asset(item: pystac.Item, product_result: dict) -> str:
+    """Write detailed DSS validation results and attach them to a storm item."""
+    item_href = item.get_self_href()
+    if item_href is None:
+        raise ValueError(f"Storm item '{item.id}' must have a self href before adding validation metadata.")
+    validation_path = os.path.join(os.path.dirname(item_href), f"{item.id}.dss-validation.json")
+    payload = {
+        "item_id": item.id,
+        "validated_at": datetime.now(timezone.utc).isoformat(),
+        "translation": {
+            key: value
+            for key, value in product_result.items()
+            if key not in {"spatial_validation", "dss_validation"}
+        },
+        "spatial_validation": product_result.get("spatial_validation", {}),
+        "dss_validation": product_result.get("dss_validation", {}),
+    }
+    with open(validation_path, "w", encoding="utf-8") as validation_file:
+        json.dump(payload, validation_file, indent=2)
+
+    item.add_asset(
+        "dss-validation",
+        Asset(
+            href=relative_local_href(validation_path, item_href),
+            title="DSS Validation Results",
+            description="Spatial translation and DSS readback validation results.",
+            media_type="application/json",
+            roles=["metadata"],
+        ),
+    )
+    return validation_path
+
+
+def relative_local_href(path: str, stac_object_href: str) -> str:
+    """Return a POSIX-style href relative to a local STAC object."""
+    stac_object_dir = os.path.dirname(os.path.abspath(stac_object_href))
+    return Path(os.path.relpath(os.path.abspath(path), start=stac_object_dir)).as_posix()
+
+
+def add_dss_manifest_asset(collection: pystac.Collection, manifest_dir: str) -> str:
+    """Write a collection-level manifest for item DSS assets."""
+    collection_href = collection.get_self_href()
+    if collection_href is None:
+        raise ValueError(f"Collection '{collection.id}' must have a self href before writing a DSS manifest.")
+
+    collection_dir = os.path.dirname(os.path.abspath(collection_href))
+    rows = []
+    for item in collection.get_items():
+        for asset_key, asset in item.assets.items():
+            if asset.media_type != "application/x-dss":
+                continue
+
+            absolute_href = asset.get_absolute_href()
+            if absolute_href is None:
+                continue
+            try:
+                rank = int(item.id)
+            except ValueError:
+                rank = item.properties.get("aorc:collection_rank")
+            spatial_role = dss_spatial_role(asset_key, asset)
+            rows.append(
+                {
+                    "item_id": item.id,
+                    "rank": rank,
+                    "spatial_role": spatial_role,
+                    "start_datetime": item.properties.get("start_datetime"),
+                    "end_datetime": item.properties.get("end_datetime"),
+                    "duration_hours": asset.extra_fields.get(
+                        "stormhub:duration_hours", storm_duration_hours(item)
+                    ),
+                    "asset_key": asset_key,
+                    "dss_filename": os.path.basename(asset.href),
+                    "dss_href": Path(os.path.relpath(absolute_href, start=collection_dir)).as_posix(),
+                    "target_watershed_id": asset.extra_fields.get("stormhub:target_watershed_id"),
+                    "x_offset_m": asset.extra_fields.get("stormhub:x_offset_m"),
+                    "y_offset_m": asset.extra_fields.get("stormhub:y_offset_m"),
+                    "validation_status": asset.extra_fields.get("stormhub:validation_status", "not_run"),
+                }
+            )
+
+    os.makedirs(manifest_dir, exist_ok=True)
+    manifest_path = os.path.join(manifest_dir, "dss-manifest.csv")
+    columns = [
+        "item_id",
+        "rank",
+        "spatial_role",
+        "start_datetime",
+        "end_datetime",
+        "duration_hours",
+        "asset_key",
+        "dss_filename",
+        "dss_href",
+        "target_watershed_id",
+        "x_offset_m",
+        "y_offset_m",
+        "validation_status",
+    ]
+    manifest = pd.DataFrame(rows, columns=columns)
+    if not manifest.empty:
+        manifest.sort_values(by=["rank", "item_id"], na_position="last", inplace=True)
+    manifest.to_csv(manifest_path, index=False)
+
+    collection.add_asset(
+        "dss_manifest",
+        Asset(
+            href=relative_local_href(manifest_path, collection_href),
+            title="DSS Asset Manifest",
+            description="Manifest of HEC-DSS files attached to storm event items.",
+            media_type="text/csv",
+            roles=["metadata"],
+        ),
+    )
+    collection.save_object()
+    return manifest_path
+
+
 def add_storm_dss_files(
     catalog: pystac.catalog,
     aoi_name: str = None,
@@ -1247,7 +1547,11 @@ def add_storm_dss_files(
     variable_duration_map: Dict[NOAADataVariable, int] = None,
     dss_output_dir: str = None,
     output_resolution_km: int = 1,
-):
+    collection_id: str = None,
+    output_modes: tuple[str, ...] = ("source",),
+    target_buffer_km: float = 5,
+    item_ids: Optional[List[str]] = None,
+) -> dict:
     """
     Add dss files containing meteorological data to all storm items in events collection.
 
@@ -1256,61 +1560,223 @@ def add_storm_dss_files(
         aoi_name (str, optional): Optional aoi name for part B of dss file. If None then the catalog ID is used.
         use_valid_region (bool, optional): If True, the gridded DSS data will be confined to the valid transposition region. If False, the the data uses the entire transposition region. Defaults to False.
         variable_duration_map (Dict[NOAADataVariable, int], Optional): Optional variable map to include multiple variables and/or different durations for dss creation. If None is given, only precipitation is used at the duration between the storm items start and end time.
-        dss_output_dir (str, optional): Optional output directory for dss files. If None, dss files are saved in the same directory as the associated storm item.
+        dss_output_dir (str, optional): Optional output directory for DSS files. If None, files are saved in the events collection's ``dss`` directory.
+        collection_id (str, optional): Events collection to export. Required when the catalog contains multiple events collections.
+        output_modes (tuple[str, ...]): DSS products to create. Supported values are "source" and "target".
+        target_buffer_km (float): Buffer around the target watershed included in target DSS output.
+        item_ids (List[str], optional): Item IDs to export. If omitted, all items are exported.
+
+    Returns
+    -------
+    dict
+        JSON-serializable run summary containing counts, per-item asset and
+        validation details, failures, and the collection manifest path.
 
     """
     if isinstance(catalog, str):
         catalog = pystac.read_file(catalog)
 
-    events_collection = get_events_collection(catalog)
+    events_collection = get_events_collection(catalog, collection_id=collection_id)
+    collection_href = events_collection.get_self_href()
+    if collection_href is None:
+        raise ValueError(f"Collection '{events_collection.id}' must have a self href before adding DSS assets.")
+    default_dss_dir = os.path.join(os.path.dirname(collection_href), "dss")
     transpo_item = get_transposition_item(catalog, use_valid_region)
     transpo_href = transpo_item.get_self_href()
+    modes = tuple(dict.fromkeys(output_modes))
+    invalid_modes = set(modes) - {"source", "target"}
+    if invalid_modes or not modes:
+        raise ValueError(f"DSS output_modes must contain source and/or target; got {output_modes}.")
+
+    watershed_item = get_watershed_item(catalog) if "target" in modes else None
+    target_geometry = shape(watershed_item.geometry) if watershed_item else None
+    items = list(events_collection.get_items())
+    if item_ids is not None:
+        requested_ids = {str(item_id) for item_id in item_ids}
+        available_ids = {item.id for item in items}
+        missing_ids = requested_ids - available_ids
+        if missing_ids:
+            raise ValueError(
+                f"Could not find item IDs {sorted(missing_ids)} in collection '{events_collection.id}'."
+            )
+        items = [item for item in items if item.id in requested_ids]
 
     if aoi_name is None:
         aoi_name = catalog.id
 
-    for item in events_collection.get_items():
+    successful_items = []
+    failed_items = []
+    for item in items:
         try:
+            item_href = item.get_self_href()
+            if item_href is None:
+                raise ValueError(f"Storm item '{item.id}' must have a self href before adding DSS assets.")
+
             if dss_output_dir:
-                item_dir = os.path.abspath(dss_output_dir)
-                os.makedirs(item_dir, exist_ok=True)
+                dss_dir = os.path.abspath(dss_output_dir)
             else:
-                item_href = item.get_self_href()
-                item_dir = os.path.dirname(item_href)
+                dss_dir = default_dss_dir
+            os.makedirs(dss_dir, exist_ok=True)
 
             full_start_date = item.properties["start_datetime"]
             start_date_dt = datetime.strptime(full_start_date, "%Y-%m-%dT%H:%M:%SZ")
-            start_date = start_date_dt.strftime("%Y%m%d")
+            output_paths = {
+                mode: os.path.join(
+                    dss_dir,
+                    storm_dss_filename(
+                        item,
+                        output_resolution_km=output_resolution_km,
+                        spatial_role=mode,
+                    ),
+                )
+                for mode in modes
+            }
 
-            dss_fn = f"{start_date}.dss"
-            dss_output_path = os.path.join(item_dir, dss_fn)
-
-            if variable_duration_map is None:
+            item_variable_duration_map = variable_duration_map
+            if item_variable_duration_map is None:
                 full_end_date = item.properties["end_datetime"]
                 end_date_dt = datetime.strptime(full_end_date, "%Y-%m-%dT%H:%M:%SZ")
                 time_difference = end_date_dt - start_date_dt
                 duration_hours = time_difference.total_seconds() / 3600
 
-                variable_duration_map = {NOAADataVariable.APCP: duration_hours}
+                item_variable_duration_map = {NOAADataVariable.APCP: duration_hours}
 
-            noaa_zarr_to_dss(
-                dss_output_path, transpo_href, aoi_name, start_date_dt, variable_duration_map, output_resolution_km
-            )
+            product_result = None
+            if "target" in modes:
+                source_geometry = source_watershed_geometry(item, target_geometry)
+                product_result = noaa_zarr_to_dss_products(
+                    output_dss_paths=output_paths,
+                    aoi_geometry_path=transpo_href,
+                    aoi_name=aoi_name,
+                    storm_start=start_date_dt,
+                    variable_duration_map=item_variable_duration_map,
+                    output_resolution_km=output_resolution_km,
+                    source_geometry=source_geometry,
+                    target_geometry=target_geometry,
+                    target_buffer_km=target_buffer_km,
+                )
+            else:
+                noaa_zarr_to_dss(
+                    output_paths["source"],
+                    transpo_href,
+                    aoi_name,
+                    start_date_dt,
+                    item_variable_duration_map,
+                    output_resolution_km,
+                )
 
-            item.add_asset(
-                dss_fn,
-                Asset(
-                    dss_output_path,
-                    dss_fn,
-                    description="DSS file containing meteorological data for storm period.",
-                    media_type="application/x-dss",
-                    roles="data",
-                ),
-            )
+            for asset_key, asset in list(item.assets.items()):
+                if asset.media_type == "application/x-dss" and dss_spatial_role(asset_key, asset) in modes:
+                    item.assets.pop(asset_key)
+
+            if "source" in modes:
+                source_path = output_paths["source"]
+                item.add_asset(
+                    "dss-source",
+                    Asset(
+                        href=relative_local_href(source_path, item_href),
+                        title=os.path.basename(source_path),
+                        description="Source-location DSS file containing AORC meteorological data for the storm period.",
+                        media_type="application/x-dss",
+                        roles=["data", "source"],
+                        extra_fields=source_dss_metadata(
+                            item,
+                            source_domain_id=transpo_item.id,
+                            output_resolution_km=output_resolution_km,
+                            dss_output_path=source_path,
+                            validation_status=dss_product_validation_status(product_result, "source"),
+                        ),
+                    ),
+                )
+            if "target" in modes:
+                target_path = output_paths["target"]
+                item.add_asset(
+                    "dss-target",
+                    Asset(
+                        href=relative_local_href(target_path, item_href),
+                        title=os.path.basename(target_path),
+                        description="Target-transposed DSS file positioned over the modeling watershed.",
+                        media_type="application/x-dss",
+                        roles=["data", "target"],
+                        extra_fields=target_dss_metadata(
+                            item,
+                            source_domain_id=transpo_item.id,
+                            target_watershed_id=watershed_item.id,
+                            output_resolution_km=output_resolution_km,
+                            target_buffer_km=target_buffer_km,
+                            dss_output_path=target_path,
+                            translation=product_result,
+                            validation_status=dss_product_validation_status(product_result, "target"),
+                        ),
+                    ),
+                )
+            if product_result and product_result.get("dss_validation"):
+                add_dss_validation_asset(item, product_result)
             item.save_object()
-            logging.info(f"Successfully saved storm dss file to: {dss_output_path}")
-        except Exception as e:
-            logging.error(f"Could not create dss file for item: {item.id} with error: {e}")
+            item_result = {
+                "item_id": item.id,
+                "asset_hrefs": {
+                    mode: item.assets[f"dss-{mode}"].href for mode in modes
+                },
+                "validation_status": {
+                    mode: item.assets[f"dss-{mode}"].extra_fields.get(
+                        "stormhub:validation_status", "not_run"
+                    )
+                    for mode in modes
+                },
+            }
+            failed_validations = [
+                mode
+                for mode, validation_status in item_result["validation_status"].items()
+                if validation_status == "failed"
+            ]
+            if failed_validations:
+                failed_items.append(
+                    {
+                        **item_result,
+                        "error_type": "DSSValidationError",
+                        "error": f"DSS validation failed for: {', '.join(failed_validations)}",
+                    }
+                )
+                logging.error(
+                    "DSS validation failed for storm item %s: %s",
+                    item.id,
+                    failed_validations,
+                )
+            else:
+                successful_items.append(item_result)
+                logging.info("Successfully saved %s DSS products for storm item %s", modes, item.id)
+        except Exception as exc:
+            failed_items.append(
+                {
+                    "item_id": item.id,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            logging.error("Could not create DSS file for item %s: %s", item.id, exc)
+
+    manifest_dir = os.path.abspath(dss_output_dir) if dss_output_dir else default_dss_dir
+    manifest_path = add_dss_manifest_asset(events_collection, manifest_dir)
+    if failed_items and successful_items:
+        status = "partial"
+    elif failed_items:
+        status = "failed"
+    else:
+        status = "passed"
+
+    return {
+        "status": status,
+        "collection_id": events_collection.id,
+        "output_modes": list(modes),
+        "requested_count": len(items),
+        "succeeded_count": len(successful_items),
+        "failed_count": len(failed_items),
+        "successful_items": successful_items,
+        "failed_items": failed_items,
+        "manifest_path": os.path.abspath(manifest_path),
+        "manifest_href": relative_local_href(manifest_path, collection_href),
+    }
 
 
 def avg_annual_max_grids(zarr_path: str, normal_precip_grid_path: str = "normalized_precip.tif"):

@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from enum import Enum
 import math
+import os
 from typing import List, Tuple, Literal, Dict
 from affine import Affine
 from hecdss import HecDss, gridded_data
@@ -10,8 +11,13 @@ import numpy as np
 from pandas import Timestamp
 import geopandas as gpd
 from geopandas import GeoDataFrame
+from pyproj import Transformer
 import s3fs
+from shapely.geometry import mapping
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform as transform_geometry
 import xarray as xr
+import rioxarray  # noqa: F401
 from stormhub.met.consts import NOAA_AORC_S3_BASE_URL, KM_TO_M_CONVERSION_FACTOR, SHG_WKT
 import logging
 
@@ -382,9 +388,195 @@ def get_s3_zarr_data(
     return ds
 
 
-def write_to_dss(
+def reproject_to_shg(data: xr.DataArray, output_resolution_km: int) -> xr.DataArray:
+    """Reproject gridded meteorological data to the Standard Hydrologic Grid."""
+    output_resolution_m = output_resolution_km * KM_TO_M_CONVERSION_FACTOR
+    times = data.time.values
+    logging.info("Reprojecting source dataset to SHG at %s km resolution", output_resolution_km)
+
+    if len(times) <= 144:
+        return data.rio.reproject(SHG_WKT, resolution=output_resolution_m)
+
+    logging.info("Chunking dataset for SHG reprojection")
+    time_chunk_size = 144
+    reprojected_chunks = []
+    for i in range(0, len(times), time_chunk_size):
+        chunk_times = times[i : i + time_chunk_size]
+        chunk = data.sel(time=chunk_times)
+        reprojected_chunks.append(chunk.rio.reproject(SHG_WKT, resolution=output_resolution_m))
+
+    return xr.concat(reprojected_chunks, dim="time")
+
+
+def project_geometry_to_shg(geometry: BaseGeometry) -> BaseGeometry:
+    """Project a WGS84 geometry to the Standard Hydrologic Grid CRS."""
+    transformer = Transformer.from_crs("EPSG:4326", SHG_WKT, always_xy=True)
+    return transform_geometry(transformer.transform, geometry)
+
+
+def calculate_shg_translation(
+    source_geometry: BaseGeometry,
+    target_geometry: BaseGeometry,
+    output_resolution_km: int,
+) -> dict:
+    """Calculate a source-to-target translation snapped to whole SHG cells."""
+    resolution_m = output_resolution_km * KM_TO_M_CONVERSION_FACTOR
+    source_centroid = project_geometry_to_shg(source_geometry).centroid
+    target_centroid = project_geometry_to_shg(target_geometry).centroid
+    raw_x_offset_m = target_centroid.x - source_centroid.x
+    raw_y_offset_m = target_centroid.y - source_centroid.y
+    x_offset_cells = int(round(raw_x_offset_m / resolution_m))
+    y_offset_cells = int(round(raw_y_offset_m / resolution_m))
+    x_offset_m = x_offset_cells * resolution_m
+    y_offset_m = y_offset_cells * resolution_m
+
+    return {
+        "method": "shg-cell-snap",
+        "direction": "source-to-target",
+        "source_center_x": source_centroid.x,
+        "source_center_y": source_centroid.y,
+        "target_center_x": target_centroid.x,
+        "target_center_y": target_centroid.y,
+        "raw_x_offset_m": raw_x_offset_m,
+        "raw_y_offset_m": raw_y_offset_m,
+        "x_offset_m": x_offset_m,
+        "y_offset_m": y_offset_m,
+        "x_offset_cells": x_offset_cells,
+        "y_offset_cells": y_offset_cells,
+        "x_snap_residual_m": raw_x_offset_m - x_offset_m,
+        "y_snap_residual_m": raw_y_offset_m - y_offset_m,
+    }
+
+
+def translate_shg_data(data: xr.DataArray, x_offset_m: float, y_offset_m: float) -> xr.DataArray:
+    """Translate SHG data without changing its values or grid resolution."""
+    x_dim = data.rio.x_dim
+    y_dim = data.rio.y_dim
+    translated = data.assign_coords(
+        {
+            x_dim: data[x_dim] + x_offset_m,
+            y_dim: data[y_dim] + y_offset_m,
+        }
+    )
+    translated.rio.set_spatial_dims(x_dim=x_dim, y_dim=y_dim, inplace=True)
+    translated.rio.write_crs(data.rio.crs, inplace=True)
+    translated.rio.write_transform(translated.rio.transform(recalc=True), inplace=True)
+    return translated
+
+
+def clip_shg_data_to_geometry(
+    data: xr.DataArray,
+    target_geometry: BaseGeometry,
+    buffer_km: float = 0,
+) -> xr.DataArray:
+    """Clip SHG data to a buffered WGS84 target geometry."""
+    target_shg = project_geometry_to_shg(target_geometry)
+    if buffer_km:
+        target_shg = target_shg.buffer(buffer_km * KM_TO_M_CONVERSION_FACTOR)
+    return data.rio.clip([mapping(target_shg)], crs=SHG_WKT, drop=True, all_touched=True)
+
+
+def validate_translated_shg_data(
+    source_data: xr.DataArray,
+    target_data: xr.DataArray,
+    x_offset_m: float,
+    y_offset_m: float,
+    target_geometry: BaseGeometry = None,
+) -> dict:
+    """Verify that target clipping preserves translated source values."""
+    translated_source = translate_shg_data(source_data, x_offset_m, y_offset_m)
+    x_dim = target_data.rio.x_dim
+    y_dim = target_data.rio.y_dim
+    expected_target = translated_source.sel(
+        {
+            x_dim: target_data[x_dim],
+            y_dim: target_data[y_dim],
+        }
+    )
+    expected_values = expected_target.to_numpy()
+    target_values = target_data.to_numpy()
+    comparison_mask = np.isfinite(target_values)
+    compared_cells = int(comparison_mask.sum())
+    values_match = compared_cells > 0 and bool(
+        np.allclose(
+            expected_values[comparison_mask],
+            target_values[comparison_mask],
+            equal_nan=False,
+        )
+    )
+    target_bounds = tuple(float(value) for value in target_data.rio.bounds())
+    target_geometry_bounds = None
+    target_geometry_covered = True
+    if target_geometry is not None:
+        target_geometry_bounds = tuple(
+            float(value) for value in project_geometry_to_shg(target_geometry).bounds
+        )
+        target_geometry_covered = (
+            target_bounds[0] <= target_geometry_bounds[0]
+            and target_bounds[1] <= target_geometry_bounds[1]
+            and target_bounds[2] >= target_geometry_bounds[2]
+            and target_bounds[3] >= target_geometry_bounds[3]
+        )
+    passed = values_match and target_geometry_covered
+    return {
+        "status": "passed" if passed else "failed",
+        "values_preserved": values_match,
+        "target_geometry_covered": target_geometry_covered,
+        "source_time_steps": int(source_data.sizes.get("time", 0)),
+        "target_time_steps": int(target_data.sizes.get("time", 0)),
+        "target_rows": int(target_data.sizes[y_dim]),
+        "target_columns": int(target_data.sizes[x_dim]),
+        "compared_cells": compared_cells,
+        "target_bounds": target_bounds,
+        "target_geometry_bounds": target_geometry_bounds,
+    }
+
+
+def validate_dss_record_counts(
+    dss_path: str,
+    variable_duration_map: Dict[NOAADataVariable, int],
+) -> dict:
+    """Reopen a DSS file and verify record counts for each requested variable."""
+    expected = {
+        variable.dss_variable_title.upper(): int(duration)
+        for variable, duration in variable_duration_map.items()
+    }
+    actual = {variable: 0 for variable in expected}
+    unexpected_records = 0
+
+    try:
+        with HecDss(dss_path) as dss:
+            for path_obj in dss.get_catalog():
+                parts = str(path_obj).strip("/").split("/")
+                if len(parts) < 3:
+                    unexpected_records += 1
+                    continue
+                variable = parts[2].upper()
+                if variable in actual:
+                    actual[variable] += 1
+                else:
+                    unexpected_records += 1
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "expected_records": expected,
+            "actual_records": actual,
+            "unexpected_records": unexpected_records,
+            "error": str(exc),
+        }
+
+    passed = actual == expected and unexpected_records == 0
+    return {
+        "status": "passed" if passed else "failed",
+        "expected_records": expected,
+        "actual_records": actual,
+        "unexpected_records": unexpected_records,
+    }
+
+
+def write_shg_to_dss(
     output_dss_path: str,
-    data: xr.Dataset,
+    data: xr.DataArray,
     aoi_name: str,
     param_name: str,
     param_measurement_type: MeasurementType,
@@ -392,40 +584,20 @@ def write_to_dss(
     output_resolution_km: int,
     data_version: str,
 ):
-    """
-    Write geospatial data to a DSS file while transforming the data to fit DSS conventions.
+    """Write data already projected to SHG into a DSS file.
 
     Args:
         output_dss_path: Path to the output DSS file
-        zarr_data: An xarray dataset containing the geospatial data to be written to the DSS file
+        data: An SHG-projected xarray array containing data to be written
         aoi_name: The name of the area of interest (AOI)
-        parameter_name: The name of the parameter being stored in the DSS file (e.g. "precipitation")
-        parameter_measurement_type: The type of measurement type of the parameter
+        param_name: The name of the parameter being stored in the DSS file
+        param_measurement_type: The measurement type of the parameter
+        param_measurement_unit: The units of the parameter
         output_resolution_km: The resolution for the data in km
         data_version: Represents where the data comes from (e.g. "AORC")
     """
     dss = HecDss(output_dss_path)
     output_resolution_m = output_resolution_km * KM_TO_M_CONVERSION_FACTOR
-
-    logging.info(f"reprojecting dataset")
-    times = data.time.values
-
-    if len(times) <= 144:
-        data: xr.DataArray = data.rio.reproject(SHG_WKT, resolution=output_resolution_m)
-    else:
-        # For larger datasets, chunking is used to avoid memory issues
-        logging.info(f"Chunking dataset for reprojection")
-        time_chunk_size = 144
-        reprojected_chunks = []
-
-        for i in range(0, len(times), time_chunk_size):
-            chunk_times = times[i : i + time_chunk_size]
-            chunk = data.sel(time=chunk_times)
-            chunk = chunk.rio.reproject(SHG_WKT, resolution=output_resolution_m)
-            reprojected_chunks.append(chunk)
-
-        data = xr.concat(reprojected_chunks, dim="time")
-
     lower_x, lower_y = get_lower_left_xy(data, output_resolution_m)
 
     for time_step in data.time:
@@ -462,6 +634,163 @@ def write_to_dss(
     dss.close()
 
 
+def write_to_dss(
+    output_dss_path: str,
+    data: xr.DataArray,
+    aoi_name: str,
+    param_name: str,
+    param_measurement_type: MeasurementType,
+    param_measurement_unit: str,
+    output_resolution_km: int,
+    data_version: str,
+):
+    """Reproject geospatial data to SHG and write it to a DSS file."""
+    shg_data = reproject_to_shg(data, output_resolution_km)
+    write_shg_to_dss(
+        output_dss_path=output_dss_path,
+        data=shg_data,
+        aoi_name=aoi_name,
+        param_name=param_name,
+        param_measurement_type=param_measurement_type,
+        param_measurement_unit=param_measurement_unit,
+        output_resolution_km=output_resolution_km,
+        data_version=data_version,
+    )
+
+
+def get_noaa_data_for_dss(
+    aoi_geometry_path: str,
+    storm_start: datetime,
+    variable_duration_map: Dict[NOAADataVariable, int],
+) -> xr.Dataset:
+    """Retrieve the AORC subset required for a DSS event export."""
+    all_variables = list(variable_duration_map.keys())
+    min_start = storm_start + timedelta(hours=1)
+    max_end = storm_start + timedelta(hours=max(variable_duration_map.values()))
+    aorc_paths = get_aorc_paths(min_start, max_end)
+    aoi_gdf = gpd.read_file(aoi_geometry_path)
+    voi_keys = [variable.value for variable in all_variables]
+
+    logging.info("Getting AORC data")
+    data = get_s3_zarr_data(aorc_paths, aoi_gdf, min_start, max_end, voi_keys)
+    logging.info("Successfully retrieved AORC data")
+    return data
+
+
+def prepare_noaa_variable_for_dss(
+    aorc_data: xr.Dataset,
+    data_variable: NOAADataVariable,
+    storm_start: datetime,
+    duration_hours: int,
+) -> xr.DataArray:
+    """Select and convert one AORC variable for a DSS event window."""
+    var_start = storm_start + timedelta(hours=1)
+    var_end = storm_start + timedelta(hours=duration_hours)
+    data = aorc_data[data_variable.value].sel(time=slice(var_start, var_end))
+
+    if data_variable == NOAADataVariable.TMP:
+        logging.info("Converting temperature dataset")
+        data = convert_temperature_dataset(data)
+        logging.info("Successfully converted temperature dataset")
+    return data
+
+
+def remove_existing_dss_files(output_paths: List[str]) -> None:
+    """Remove prior DSS products so reruns do not retain record history or dead space."""
+    for output_path in dict.fromkeys(output_paths):
+        try:
+            os.remove(output_path)
+            logging.info("Replacing existing DSS output: %s", output_path)
+        except FileNotFoundError:
+            pass
+
+
+def noaa_zarr_to_dss_products(
+    output_dss_paths: Dict[str, str],
+    aoi_geometry_path: str,
+    aoi_name: str,
+    storm_start: datetime,
+    variable_duration_map: Dict[NOAADataVariable, int],
+    output_resolution_km: int,
+    source_geometry: BaseGeometry = None,
+    target_geometry: BaseGeometry = None,
+    target_buffer_km: float = 5,
+) -> dict | None:
+    """Create source and/or target DSS products from one AORC retrieval."""
+    invalid_roles = set(output_dss_paths) - {"source", "target"}
+    if invalid_roles:
+        raise ValueError(f"Unsupported DSS output roles: {sorted(invalid_roles)}")
+    if not output_dss_paths:
+        raise ValueError("At least one DSS output role is required.")
+    if "target" in output_dss_paths and (source_geometry is None or target_geometry is None):
+        raise ValueError("Source and target geometries are required for target DSS output.")
+
+    translation = None
+    if "target" in output_dss_paths:
+        translation = calculate_shg_translation(source_geometry, target_geometry, output_resolution_km)
+
+    spatial_validation = {}
+    aorc_data = get_noaa_data_for_dss(aoi_geometry_path, storm_start, variable_duration_map)
+    remove_existing_dss_files(list(output_dss_paths.values()))
+    for data_variable, duration in variable_duration_map.items():
+        source_data = prepare_noaa_variable_for_dss(aorc_data, data_variable, storm_start, duration)
+        shg_source_data = reproject_to_shg(source_data, output_resolution_km)
+
+        if "source" in output_dss_paths:
+            logging.info("Writing source-location data to DSS")
+            write_shg_to_dss(
+                output_dss_path=output_dss_paths["source"],
+                data=shg_source_data,
+                aoi_name=aoi_name,
+                param_name=data_variable.dss_variable_title,
+                param_measurement_type=data_variable.measurement_type,
+                param_measurement_unit=data_variable.measurement_unit,
+                output_resolution_km=output_resolution_km,
+                data_version="AORC",
+            )
+
+        if "target" in output_dss_paths:
+            logging.info("Translating source data to the target watershed")
+            shg_target_data = translate_shg_data(
+                shg_source_data,
+                translation["x_offset_m"],
+                translation["y_offset_m"],
+            )
+            shg_target_data = clip_shg_data_to_geometry(
+                shg_target_data,
+                target_geometry,
+                buffer_km=target_buffer_km,
+            )
+            spatial_validation[data_variable.dss_variable_title] = validate_translated_shg_data(
+                shg_source_data,
+                shg_target_data,
+                translation["x_offset_m"],
+                translation["y_offset_m"],
+                target_geometry=target_geometry,
+            )
+            logging.info("Writing target-transposed data to DSS")
+            write_shg_to_dss(
+                output_dss_path=output_dss_paths["target"],
+                data=shg_target_data,
+                aoi_name=aoi_name,
+                param_name=data_variable.dss_variable_title,
+                param_measurement_type=data_variable.measurement_type,
+                param_measurement_unit=data_variable.measurement_unit,
+                output_resolution_km=output_resolution_km,
+                data_version="AORC-TRANSPOSED",
+            )
+
+    dss_validation = {
+        role: validate_dss_record_counts(path, variable_duration_map)
+        for role, path in output_dss_paths.items()
+    }
+    if translation is None:
+        translation = {}
+    translation["spatial_validation"] = spatial_validation
+    translation["dss_validation"] = dss_validation
+    return translation
+
+
 def noaa_zarr_to_dss(
     output_dss_path: str,
     aoi_geometry_gpkg_path: str,
@@ -471,33 +800,16 @@ def noaa_zarr_to_dss(
     output_resolution_km: int,
 ):
     """Given a geometry and datetime information about a storm, writes variables of interest from NOAA dataset to DSS."""
-    # arrange parameters
-    all_variables = list(variable_duration_map.keys())
-    min_start = storm_start + timedelta(hours=1)  # make exclusive
-    max_end = storm_start + timedelta(hours=max(variable_duration_map.values()))
-    aorc_paths = get_aorc_paths(min_start, max_end)
-    aoi_gdf = gpd.read_file(aoi_geometry_gpkg_path)
-    voi_keys = [v.value for v in all_variables]
+    aorc_data = get_noaa_data_for_dss(aoi_geometry_gpkg_path, storm_start, variable_duration_map)
+    remove_existing_dss_files([output_dss_path])
 
-    # get aorc data
-    logging.info("Getting aorc data")
-    aorc_data = get_s3_zarr_data(aorc_paths, aoi_gdf, min_start, max_end, voi_keys)
-    logging.info("Successfully retrieved aorc data")
-
-    # write to dss
     for data_variable, duration in variable_duration_map.items():
-        var_start = storm_start + timedelta(hours=1)
-        var_end = storm_start + timedelta(hours=duration)
-        data = aorc_data[data_variable.value].sel(time=slice(var_start, var_end))
-
-        if data_variable == NOAADataVariable.TMP:
-            logging.info("converting temperature dataset")
-            data = convert_temperature_dataset(data)
-            logging.info("Successfully converted temperature dataset")
-        logging.info("writing to dss")
-        write_to_dss(
+        source_data = prepare_noaa_variable_for_dss(aorc_data, data_variable, storm_start, duration)
+        shg_source_data = reproject_to_shg(source_data, output_resolution_km)
+        logging.info("Writing source-location data to DSS")
+        write_shg_to_dss(
             output_dss_path=output_dss_path,
-            data=data,
+            data=shg_source_data,
             aoi_name=aoi_name,
             param_name=data_variable.dss_variable_title,
             param_measurement_type=data_variable.measurement_type,
