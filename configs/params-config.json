@@ -1,22 +1,22 @@
 {
    "watershed": {
-      "id": "allegheny",
-      "geometry_file": "/workspaces/stormhub/data/0_source/huc04/allegheny_huc.geojson",
-      "description": "Watershed for use in development of storm catalog"
-   },
+      "id": "lwi-r3-huc12-domain",
+      "geometry_file": "c:\\Users\\ah5766\\code\\stormhub\\data\\lwi-region3\\lwi_r3_huc12_domain.json",
+      "description": "LWI Region 3 HUC12 watershed domain"
+  },
    "transposition_region": {
-      "id": "allegheny-transpo-area-v01",
-      "geometry_file": "/workspaces/stormhub/data/0_source/transposition/allegheny_slamsim2_transpo.geojson",
-      "description": "Transposition Domain developed by the ARC team"
-   },
+      "id": "lwi-r3-transposition-domain",
+      "geometry_file": "c:\\Users\\ah5766\\code\\stormhub\\data\\lwi-region3\\lwi_r3_climate_transposition_domain.json",
+      "description": "LWI Region 3 transposition domain"
+  },
    "params": {
       "start_date": "1979-02-01",
-      "end_date": "1979-02-28",
-      "top_n_events": 10,
+      "end_date": "2025-12-31",
+      "top_n_events": 460,
       "check_every_n_hours": 24,
-      "num_workers": 12,
+      "num_workers": 8,
       "storm_duration_hours": 72,
-      "min_precip_threshold_inches": 1.0,
+      "min_precip_threshold_inches": 2.5,
       "output_resolution_km": 1
    }
 }

@@ -1,4 +1,4 @@
-"""Class to handle transpoition functionality."""
+"""Class to handle transposition functionality."""
 
 from typing import Any, Callable
 
