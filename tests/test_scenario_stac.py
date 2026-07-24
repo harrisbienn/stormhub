@@ -8,7 +8,11 @@ import pytest
 
 from stormhub.scenarios import (
     ExecutionSpec,
+    HydraulicStageSpec,
     HydraulicModel,
+    HydrologicBoundaryMapping,
+    HydrologicModel,
+    HydrologicStageSpec,
     SoftwareProvenance,
     file_reference_from_path,
     geometry_sha256,
@@ -83,50 +87,90 @@ def save_stac_inputs(root: Path) -> tuple[pystac.Item, pystac.Item, Path]:
     return storm_item, watershed_item, dss_path
 
 
-def make_model_and_execution(root: Path, manifest_path: Path) -> tuple[HydraulicModel, ExecutionSpec]:
-    """Create content-addressed hydraulic model and software provenance."""
-    model_path = root / "models" / "lwi-r3-ras.zip"
-    model_path.parent.mkdir(parents=True)
-    model_path.write_bytes(b"versioned HEC-RAS project")
-    model_package = file_reference_from_path(
-        model_path,
+def make_stages(
+    root: Path,
+    manifest_path: Path,
+) -> tuple[HydrologicStageSpec, HydraulicStageSpec]:
+    """Create content-addressed HMS and RAS stages with software provenance."""
+    hms_path = root / "models" / "lwi-r3-hms.zip"
+    ras_path = root / "models" / "lwi-r3-ras.zip"
+    hms_path.parent.mkdir(parents=True)
+    hms_path.write_bytes(b"versioned HEC-HMS project")
+    ras_path.write_bytes(b"versioned HEC-RAS project")
+    hms_package = file_reference_from_path(
+        hms_path,
+        manifest_path,
+        asset_key="hydrologic-model",
+        media_type="application/zip",
+        roles=["data", "model"],
+    )
+    ras_package = file_reference_from_path(
+        ras_path,
         manifest_path,
         asset_key="hydraulic-model",
         media_type="application/zip",
         roles=["data", "model"],
     )
-    model = HydraulicModel(
-        model_id="lwi-r3-ras",
-        model_version="2026.07",
-        engine_version="6.6",
-        plan_name="forecast-plan",
-        package=model_package,
+    software = SoftwareProvenance(
+        repository="https://example.com/flood-model-runner.git",
+        revision="0123456789abcdef",
+        operating_system="Windows Server 2025",
+        python_version="3.12.10",
     )
-    execution = ExecutionSpec(
-        runner="windows-hec-ras-worker",
-        software=SoftwareProvenance(
-            repository="https://example.com/flood-model-runner.git",
-            revision="0123456789abcdef",
-            operating_system="Windows Server 2025",
-            python_version="3.12.10",
+    hydrologic = HydrologicStageSpec(
+        model=HydrologicModel(
+            model_id="lwi-r3-hms",
+            model_version="2026.07",
+            engine_version="4.13",
+            run_name="forecast-run",
+            package=hms_package,
         ),
-        parameters={"computation_interval_minutes": 5},
+        execution=ExecutionSpec(
+            runner="windows-hec-hms-worker",
+            software=software,
+        ),
     )
-    return model, execution
+    hydraulic = HydraulicStageSpec(
+        model=HydraulicModel(
+            model_id="lwi-r3-ras",
+            model_version="2026.07",
+            engine_version="6.6",
+            plan_name="forecast-plan",
+            package=ras_package,
+        ),
+        execution=ExecutionSpec(
+            runner="windows-hec-ras-worker",
+            software=software,
+            parameters={"computation_interval_minutes": 5},
+        ),
+        boundary_mappings=[
+            HydrologicBoundaryMapping(
+                mapping_id="outlet-1",
+                hms_element="J_OUTLET",
+                hms_dss_pathname="/BASIN/J_OUTLET/FLOW//15MIN/RUN/",
+                ras_boundary_id="upstream-1",
+                ras_boundary_type="Flow Hydrograph",
+                ras_location={"river": "River", "reach": "Reach", "station": "1000"},
+                units="CFS",
+                interval_minutes=15,
+            )
+        ],
+    )
+    return hydrologic, hydraulic
 
 
 def test_build_scenario_spec_from_stormhub_items(tmp_path: Path) -> None:
     """Create a portable, checksum-pinned specification from existing STAC Items."""
     storm_item, watershed_item, dss_path = save_stac_inputs(tmp_path)
     manifest_path = tmp_path / "runs" / "scenario-1" / "scenario-run.json"
-    model, execution = make_model_and_execution(tmp_path, manifest_path)
+    hydrologic, hydraulic = make_stages(tmp_path, manifest_path)
 
     spec = scenario_run_spec_from_stac(
         storm_item,
         watershed_item,
-        model,
-        execution,
+        hydraulic,
         manifest_path,
+        hydrologic=hydrologic,
     )
 
     assert spec.precipitation.duration_hours == 24
@@ -135,23 +179,24 @@ def test_build_scenario_spec_from_stormhub_items(tmp_path: Path) -> None:
     assert spec.precipitation.transposed_dss.sha256 == sha256_file(dss_path)
     assert spec.precipitation.transposed_dss.asset_href == "../../catalog/24hr-events/dss/event-target.dss"
     assert spec.watershed.geometry_sha256 == geometry_sha256(watershed_item.geometry)
-    assert spec.hydraulic_model.package.href == "../../models/lwi-r3-ras.zip"
+    assert spec.hydrologic.model.package.href == "../../models/lwi-r3-hms.zip"
+    assert spec.hydraulic.model.package.href == "../../models/lwi-r3-ras.zip"
 
 
 def test_adapter_rejects_changed_dss_content(tmp_path: Path) -> None:
     """Stop submission when the DSS bytes no longer match their STAC metadata."""
     storm_item, watershed_item, dss_path = save_stac_inputs(tmp_path)
     manifest_path = tmp_path / "runs" / "scenario-1" / "scenario-run.json"
-    model, execution = make_model_and_execution(tmp_path, manifest_path)
+    hydrologic, hydraulic = make_stages(tmp_path, manifest_path)
     dss_path.write_bytes(b"changed after catalog publication")
 
     with pytest.raises(ValueError, match="Checksum mismatch"):
         scenario_run_spec_from_stac(
             storm_item,
             watershed_item,
-            model,
-            execution,
+            hydraulic,
             manifest_path,
+            hydrologic=hydrologic,
         )
 
 
@@ -159,14 +204,14 @@ def test_adapter_rejects_wrong_watershed(tmp_path: Path) -> None:
     """Prevent a transposed forcing file from running against another watershed."""
     storm_item, watershed_item, _ = save_stac_inputs(tmp_path)
     manifest_path = tmp_path / "runs" / "scenario-1" / "scenario-run.json"
-    model, execution = make_model_and_execution(tmp_path, manifest_path)
+    hydrologic, hydraulic = make_stages(tmp_path, manifest_path)
     watershed_item.id = "different-watershed"
 
     with pytest.raises(ValueError, match="does not match requested watershed"):
         scenario_run_spec_from_stac(
             storm_item,
             watershed_item,
-            model,
-            execution,
+            hydraulic,
             manifest_path,
+            hydrologic=hydrologic,
         )

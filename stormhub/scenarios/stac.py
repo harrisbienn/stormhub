@@ -14,13 +14,14 @@ import pystac
 
 from stormhub.scenarios.contract import (
     AntecedentConditions,
-    ExecutionSpec,
     FileReference,
-    HydraulicModel,
+    HydraulicStageSpec,
+    HydrologicStageSpec,
     PrecipitationInput,
     ScenarioRunSpec,
     StacAssetReference,
     WatershedReference,
+    WorkflowKind,
 )
 from stormhub.utils import sha256_file, sha256_from_checksum
 
@@ -137,10 +138,11 @@ def file_reference_from_path(
 def scenario_run_spec_from_stac(
     storm_item: pystac.Item,
     watershed_item: pystac.Item,
-    hydraulic_model: HydraulicModel,
-    execution: ExecutionSpec,
+    hydraulic: HydraulicStageSpec,
     manifest_path: str | Path,
     *,
+    hydrologic: HydrologicStageSpec | None = None,
+    workflow: WorkflowKind | None = None,
     source_asset_key: str = "AORC",
     target_dss_asset_key: str = "dss-target",
     antecedent_conditions: AntecedentConditions | None = None,
@@ -149,7 +151,7 @@ def scenario_run_spec_from_stac(
 ) -> ScenarioRunSpec:
     """Build a validated run specification from a StormHub event and watershed.
 
-    The adapter is intentionally strict at the hydraulic submission boundary.
+    The adapter is intentionally strict at the model submission boundary.
     It rejects a target DSS associated with another watershed, failed or missing
     DSS validation, missing event dates, and local checksum mismatches.
     """
@@ -189,7 +191,14 @@ def scenario_run_spec_from_stac(
     )
     rank = storm_item.properties.get("aorc:collection_rank")
 
+    selected_workflow = workflow or (
+        WorkflowKind.HYDROLOGIC_HYDRAULIC
+        if hydrologic is not None
+        else WorkflowKind.HYDRAULIC_ONLY
+    )
+
     return ScenarioRunSpec(
+        workflow=selected_workflow,
         watershed=WatershedReference(
             watershed_id=watershed_item.id,
             item_href=_item_href(watershed_item, manifest_path),
@@ -203,7 +212,7 @@ def scenario_run_spec_from_stac(
             duration_hours=int(duration),
             rank=int(rank) if rank is not None else None,
         ),
-        hydraulic_model=hydraulic_model,
-        execution=execution,
+        hydrologic=hydrologic,
+        hydraulic=hydraulic,
         antecedent_conditions=antecedent_conditions,
     )
