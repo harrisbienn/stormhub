@@ -1,4 +1,4 @@
-"""Tests for publishing hydraulic scenario runs into a STAC Catalog."""
+"""Tests for publishing integrated flood scenario runs into a STAC Catalog."""
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -11,7 +11,11 @@ from pydantic import ValidationError
 from stormhub.scenarios import (
     ExecutionSpec,
     FailureDetails,
+    HydraulicStageSpec,
     HydraulicModel,
+    HydrologicBoundaryMapping,
+    HydrologicModel,
+    HydrologicStageSpec,
     PrecipitationInput,
     QualityStatus,
     QualitySummary,
@@ -19,8 +23,11 @@ from stormhub.scenarios import (
     ScenarioRun,
     ScenarioRunSpec,
     SoftwareProvenance,
+    StageName,
+    StageRun,
     StacAssetReference,
     WatershedReference,
+    WorkflowKind,
     file_reference_from_path,
     geometry_sha256,
     load_scenario_run,
@@ -85,20 +92,38 @@ def make_terminal_run(
     """Build a terminal run and its checksum-pinned local artifacts."""
     manifest_path = root / "work" / run_id / "scenario-run.json"
     dss_path = root / "catalog" / "24hr-events" / "dss" / "event-target.dss"
-    model_path = root / "models" / "lwi-r3-ras.zip"
+    hms_model_path = root / "models" / "lwi-r3-hms.zip"
+    ras_model_path = root / "models" / "lwi-r3-ras.zip"
+    hms_output_path = root / "outputs" / run_id / "hms-output.dss"
     output_path = root / "outputs" / run_id / "wse.tif"
-    for path in (dss_path, model_path, output_path):
+    for path in (dss_path, hms_model_path, ras_model_path, hms_output_path, output_path):
         path.parent.mkdir(parents=True, exist_ok=True)
     dss_path.write_bytes(b"watershed precipitation")
-    model_path.write_bytes(b"HEC-RAS model package")
+    hms_model_path.write_bytes(b"HEC-HMS model package")
+    ras_model_path.write_bytes(b"HEC-RAS model package")
+    hms_output_path.write_bytes(b"HMS flow results")
     output_path.write_bytes(b"water surface elevation")
 
-    model_package = file_reference_from_path(
-        model_path,
+    hms_model_package = file_reference_from_path(
+        hms_model_path,
+        manifest_path,
+        asset_key="hydrologic-model",
+        media_type="application/zip",
+        roles=["data", "model"],
+    )
+    ras_model_package = file_reference_from_path(
+        ras_model_path,
         manifest_path,
         asset_key="hydraulic-model",
         media_type="application/zip",
         roles=["data", "model"],
+    )
+    hms_output = file_reference_from_path(
+        hms_output_path,
+        manifest_path,
+        asset_key="hms-output-dss",
+        media_type="application/x-dss",
+        roles=["data", "hydrologic-output"],
     )
     output = file_reference_from_path(
         output_path,
@@ -108,7 +133,14 @@ def make_terminal_run(
         roles=["data", "hydraulic-output"],
         metadata={"proj:code": "EPSG:5070"},
     )
+    software = SoftwareProvenance(
+        repository="https://example.com/flood-model-runner.git",
+        revision="0123456789abcdef",
+        operating_system="Windows Server 2025",
+        python_version="3.12.10",
+    )
     spec = ScenarioRunSpec(
+        workflow=WorkflowKind.HYDROLOGIC_HYDRAULIC,
         watershed=WatershedReference(
             watershed_id=watershed.id,
             item_href=relative_to_manifest(Path(watershed.get_self_href()), manifest_path),
@@ -135,21 +167,43 @@ def make_terminal_run(
             duration_hours=24,
             rank=1,
         ),
-        hydraulic_model=HydraulicModel(
-            model_id="lwi-r3-ras",
-            model_version="2026.07",
-            engine_version="6.6",
-            plan_name="forecast-plan",
-            package=model_package,
-        ),
-        execution=ExecutionSpec(
-            runner="windows-hec-ras-worker",
-            software=SoftwareProvenance(
-                repository="https://example.com/flood-model-runner.git",
-                revision="0123456789abcdef",
-                operating_system="Windows Server 2025",
-                python_version="3.12.10",
+        hydrologic=HydrologicStageSpec(
+            model=HydrologicModel(
+                model_id="lwi-r3-hms",
+                model_version="2026.07",
+                engine_version="4.13",
+                run_name="forecast-run",
+                package=hms_model_package,
             ),
+            execution=ExecutionSpec(
+                runner="windows-hec-hms-worker",
+                software=software,
+            ),
+        ),
+        hydraulic=HydraulicStageSpec(
+            model=HydraulicModel(
+                model_id="lwi-r3-ras",
+                model_version="2026.07",
+                engine_version="6.6",
+                plan_name="forecast-plan",
+                package=ras_model_package,
+            ),
+            execution=ExecutionSpec(
+                runner="windows-hec-ras-worker",
+                software=software,
+            ),
+            boundary_mappings=[
+                HydrologicBoundaryMapping(
+                    mapping_id="outlet-1",
+                    hms_element="J_OUTLET",
+                    hms_dss_pathname="/BASIN/J_OUTLET/FLOW//15MIN/RUN/",
+                    ras_boundary_id="upstream-1",
+                    ras_boundary_type="Flow Hydrograph",
+                    ras_location={"river": "River", "reach": "Reach", "station": "1000"},
+                    units="CFS",
+                    interval_minutes=15,
+                )
+            ],
         ),
     )
     planned = new_scenario_run(spec, run_id=run_id, created_at=START)
@@ -162,7 +216,25 @@ def make_terminal_run(
         }
     )
     if status == RunStatus.SUCCEEDED:
-        payload["outputs"] = [output.model_dump()]
+        payload["outputs"] = [hms_output.model_dump(), output.model_dump()]
+        payload["stages"] = [
+            StageRun(
+                stage=StageName.HYDROLOGIC,
+                status=RunStatus.SUCCEEDED,
+                started_at=START + timedelta(minutes=1),
+                completed_at=START + timedelta(minutes=10),
+                output_asset_keys=["hms-output-dss"],
+                quality=QualitySummary(status=QualityStatus.PASSED),
+            ).model_dump(),
+            StageRun(
+                stage=StageName.HYDRAULIC,
+                status=RunStatus.SUCCEEDED,
+                started_at=START + timedelta(minutes=11),
+                completed_at=START + timedelta(minutes=31),
+                output_asset_keys=["wse"],
+                quality=QualitySummary(status=QualityStatus.PASSED),
+            ).model_dump(),
+        ]
         payload["quality"] = QualitySummary(status=QualityStatus.PASSED).model_dump()
     else:
         payload["failure"] = FailureDetails(
@@ -180,17 +252,29 @@ def test_publish_successful_run_creates_portable_catalog_tree(tmp_path: Path) ->
 
     item = publish_scenario_run(catalog, run, manifest_path, watershed)
 
-    item_path = tmp_path / "catalog" / "hydraulic-scenario-runs" / run.run_id / f"{run.run_id}.json"
-    collection_path = tmp_path / "catalog" / "hydraulic-scenario-runs" / "collection.json"
+    item_path = tmp_path / "catalog" / "flood-scenario-runs" / run.run_id / f"{run.run_id}.json"
+    collection_path = tmp_path / "catalog" / "flood-scenario-runs" / "collection.json"
     assert item_path.exists()
     assert collection_path.exists()
     assert load_scenario_run(manifest_path) == run
 
     saved_item = pystac.Item.from_file(str(item_path))
-    assert set(saved_item.assets) == {"scenario-run", "dss-target", "hydraulic-model", "wse"}
+    assert set(saved_item.assets) == {
+        "scenario-run",
+        "dss-target",
+        "hydrologic-model",
+        "hydraulic-model",
+        "hms-output-dss",
+        "wse",
+    }
     assert saved_item.assets["wse"].extra_fields["proj:code"] == "EPSG:5070"
     assert saved_item.assets["wse"].href.startswith("../../../outputs/")
     assert saved_item.properties["stormhub:run_status"] == "succeeded"
+    assert saved_item.properties["stormhub:workflow"] == "hydrologic_hydraulic"
+    assert saved_item.properties["stormhub:stage_statuses"] == {
+        "hydrologic": "succeeded",
+        "hydraulic": "succeeded",
+    }
     assert saved_item.properties["stormhub:quality_status"] == "passed"
     assert any(link.rel == pystac.RelType.DERIVED_FROM for link in saved_item.links)
     assert any(link.rel == "related" for link in saved_item.links)
@@ -200,7 +284,7 @@ def test_publish_successful_run_creates_portable_catalog_tree(tmp_path: Path) ->
     manifest_checksum = saved_item.assets["scenario-run"].extra_fields["file:checksum"]
     assert sha256_from_checksum(manifest_checksum) == sha256_file(manifest_path)
     reloaded = pystac.Catalog.from_file(str(tmp_path / "catalog" / "catalog.json"))
-    assert reloaded.get_child("hydraulic-scenario-runs").get_item(run.run_id) is not None
+    assert reloaded.get_child("flood-scenario-runs").get_item(run.run_id) is not None
     assert item.id == run.run_id
 
 

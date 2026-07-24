@@ -1,4 +1,4 @@
-"""Publish completed hydraulic scenario runs as portable STAC Items."""
+"""Publish completed flood scenario runs as portable STAC Items."""
 
 from __future__ import annotations
 
@@ -16,8 +16,10 @@ from stormhub.scenarios.contract import FileReference, RunStatus, ScenarioRun, w
 from stormhub.scenarios.stac import geometry_sha256
 from stormhub.utils import sha256_file, sha256_multihash
 
-DEFAULT_COLLECTION_ID = "hydraulic-scenario-runs"
-DEFAULT_COLLECTION_DESCRIPTION = "Hydraulic model executions derived from StormHub precipitation scenarios."
+DEFAULT_COLLECTION_ID = "flood-scenario-runs"
+DEFAULT_COLLECTION_DESCRIPTION = (
+    "Hydrologic-hydraulic model executions derived from StormHub precipitation scenarios."
+)
 
 
 def _is_remote_href(href: str) -> bool:
@@ -109,7 +111,7 @@ def scenario_run_to_stac_item(
     collection_id: str = DEFAULT_COLLECTION_ID,
     verify_files: bool = True,
 ) -> pystac.Item:
-    """Create a STAC Item for a terminal hydraulic scenario run.
+    """Create a STAC Item for a terminal flood scenario run.
 
     The manifest must already exist at ``manifest_path``. Local model packages,
     outputs, and the target DSS are verified before their Assets are emitted.
@@ -120,7 +122,9 @@ def scenario_run_to_stac_item(
         raise ValueError(f"Scenario run manifest does not exist: {manifest}")
     _validate_publishable_run(run, watershed_item)
 
-    references = [run.spec.hydraulic_model.package, *run.outputs]
+    references = [run.spec.hydraulic.model.package, *run.outputs]
+    if run.spec.hydrologic is not None:
+        references.insert(0, run.spec.hydrologic.model.package)
     if verify_files:
         for reference in references:
             _verify_file_reference(reference, manifest)
@@ -140,6 +144,7 @@ def scenario_run_to_stac_item(
 
     properties = {
         "stormhub:contract_version": run.contract_version,
+        "stormhub:workflow": run.spec.workflow.value,
         "stormhub:run_status": run.status.value,
         "stormhub:specification_sha256": run.specification_sha256,
         "stormhub:created_at": run.created_at.isoformat(),
@@ -148,14 +153,27 @@ def scenario_run_to_stac_item(
         "stormhub:watershed_id": run.spec.watershed.watershed_id,
         "stormhub:precipitation_item_id": run.spec.precipitation.source_aorc.item_id,
         "stormhub:precipitation_collection_id": run.spec.precipitation.source_aorc.collection_id,
-        "stormhub:hydraulic_model_id": run.spec.hydraulic_model.model_id,
-        "stormhub:hydraulic_model_version": run.spec.hydraulic_model.model_version,
-        "stormhub:engine": run.spec.hydraulic_model.engine,
-        "stormhub:engine_version": run.spec.hydraulic_model.engine_version,
-        "stormhub:plan_name": run.spec.hydraulic_model.plan_name,
+        "stormhub:hydraulic_model_id": run.spec.hydraulic.model.model_id,
+        "stormhub:hydraulic_model_version": run.spec.hydraulic.model.model_version,
+        "stormhub:engine": run.spec.hydraulic.model.engine,
+        "stormhub:engine_version": run.spec.hydraulic.model.engine_version,
+        "stormhub:plan_name": run.spec.hydraulic.model.plan_name,
+        "stormhub:stage_statuses": {
+            stage.stage.value: stage.status.value for stage in run.stages
+        },
         "stormhub:quality_status": run.quality.status.value,
         "stormhub:labels": run.labels,
     }
+    if run.spec.hydrologic is not None:
+        properties.update(
+            {
+                "stormhub:hydrologic_model_id": run.spec.hydrologic.model.model_id,
+                "stormhub:hydrologic_model_version": run.spec.hydrologic.model.model_version,
+                "stormhub:hydrologic_engine": run.spec.hydrologic.model.engine,
+                "stormhub:hydrologic_engine_version": run.spec.hydrologic.model.engine_version,
+                "stormhub:hms_run_name": run.spec.hydrologic.model.run_name,
+            }
+        )
     if run.failure is not None:
         properties["stormhub:failure"] = {
             "error_type": run.failure.error_type,
@@ -222,9 +240,14 @@ def scenario_run_to_stac_item(
         ),
     )
     item.add_asset(
-        run.spec.hydraulic_model.package.asset_key,
-        _file_asset(run.spec.hydraulic_model.package, manifest, output_item_path),
+        run.spec.hydraulic.model.package.asset_key,
+        _file_asset(run.spec.hydraulic.model.package, manifest, output_item_path),
     )
+    if run.spec.hydrologic is not None:
+        item.add_asset(
+            run.spec.hydrologic.model.package.asset_key,
+            _file_asset(run.spec.hydrologic.model.package, manifest, output_item_path),
+        )
     for output in run.outputs:
         item.add_asset(output.asset_key, _file_asset(output, manifest, output_item_path))
     return item
@@ -237,7 +260,7 @@ def _new_collection(
     collection_path: Path,
     license: str,
 ) -> pystac.Collection:
-    """Create a hydraulic-runs Collection initialized from its first Item."""
+    """Create a flood-scenario Collection initialized from its first Item."""
     extent = pystac.Extent(
         spatial=pystac.SpatialExtent([item.bbox]),
         temporal=pystac.TemporalExtent([[item.common_metadata.start_datetime, item.common_metadata.end_datetime]]),
