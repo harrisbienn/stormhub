@@ -1,4 +1,4 @@
-"""Tests for the versioned hydraulic scenario run contract."""
+"""Tests for the versioned hydrologic-hydraulic scenario run contract."""
 
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
@@ -13,7 +13,11 @@ from stormhub.scenarios import (
     ExecutionSpec,
     FailureDetails,
     FileReference,
+    HydraulicStageSpec,
     HydraulicModel,
+    HydrologicBoundaryMapping,
+    HydrologicModel,
+    HydrologicStageSpec,
     PrecipitationInput,
     QualityStatus,
     QualitySummary,
@@ -21,8 +25,11 @@ from stormhub.scenarios import (
     ScenarioRun,
     ScenarioRunSpec,
     SoftwareProvenance,
+    StageName,
+    StageRun,
     StacAssetReference,
     WatershedReference,
+    WorkflowKind,
     load_scenario_run,
     new_scenario_run,
     scenario_run_schema,
@@ -61,7 +68,14 @@ def make_stac_reference(asset_key: str) -> StacAssetReference:
 
 def make_spec(parameters: dict | None = None) -> ScenarioRunSpec:
     """Create a complete run specification."""
+    software = SoftwareProvenance(
+        repository="https://example.com/flood-model-runner.git",
+        revision="0123456789abcdef",
+        operating_system="Windows Server 2025",
+        python_version="3.12.10",
+    )
     return ScenarioRunSpec(
+        workflow=WorkflowKind.HYDROLOGIC_HYDRAULIC,
         watershed=WatershedReference(
             watershed_id="lwi-r3-huc12-domain",
             item_href="../../hydro_domains/lwi-r3-huc12-domain.json",
@@ -75,22 +89,48 @@ def make_spec(parameters: dict | None = None) -> ScenarioRunSpec:
             duration_hours=24,
             rank=1,
         ),
-        hydraulic_model=HydraulicModel(
-            model_id="lwi-r3-ras",
-            model_version="2026.07",
-            engine_version="6.6",
-            plan_name="unsteady-plan",
-            package=make_file_reference(),
-        ),
-        execution=ExecutionSpec(
-            runner="windows-hec-ras-worker",
-            software=SoftwareProvenance(
-                repository="https://example.com/flood-model-runner.git",
-                revision="0123456789abcdef",
-                operating_system="Windows Server 2025",
-                python_version="3.12.10",
+        hydrologic=HydrologicStageSpec(
+            model=HydrologicModel(
+                model_id="lwi-r3-hms",
+                model_version="2026.07",
+                engine_version="4.13",
+                run_name="forecast-run",
+                package=make_file_reference(
+                    "artifacts/hms-model.zip",
+                    asset_key="hydrologic-model",
+                ),
             ),
-            parameters=parameters or {"computation_interval_minutes": 5},
+            execution=ExecutionSpec(
+                runner="windows-hec-hms-worker",
+                software=software,
+                parameters={"control_interval_minutes": 15},
+            ),
+        ),
+        hydraulic=HydraulicStageSpec(
+            model=HydraulicModel(
+                model_id="lwi-r3-ras",
+                model_version="2026.07",
+                engine_version="6.6",
+                plan_name="unsteady-plan",
+                package=make_file_reference(),
+            ),
+            execution=ExecutionSpec(
+                runner="windows-hec-ras-worker",
+                software=software,
+                parameters=parameters or {"computation_interval_minutes": 5},
+            ),
+            boundary_mappings=[
+                HydrologicBoundaryMapping(
+                    mapping_id="outlet-1",
+                    hms_element="J_OUTLET",
+                    hms_dss_pathname="/BASIN/J_OUTLET/FLOW//15MIN/RUN/",
+                    ras_boundary_id="upstream-1",
+                    ras_boundary_type="Flow Hydrograph",
+                    ras_location={"river": "River", "reach": "Reach", "station": "1000"},
+                    units="CFS",
+                    interval_minutes=15,
+                )
+            ],
         ),
     )
 
@@ -126,7 +166,7 @@ def test_changed_spec_rejects_stale_digest() -> None:
     """Detect input changes that would otherwise masquerade as the same run."""
     run = new_scenario_run(make_spec(), created_at=UTC_START)
     payload = run.model_dump()
-    payload["spec"]["execution"]["parameters"]["computation_interval_minutes"] = 10
+    payload["spec"]["hydraulic"]["execution"]["parameters"]["computation_interval_minutes"] = 10
 
     with pytest.raises(ValidationError, match="specification_sha256 does not match"):
         ScenarioRun.model_validate(payload)
@@ -150,7 +190,28 @@ def test_succeeded_run_requires_output_and_valid_timestamps() -> None:
         status=RunStatus.SUCCEEDED,
         started_at=UTC_START,
         completed_at=completed_at,
-        outputs=[make_file_reference("outputs/wse.tif", asset_key="wse")],
+        outputs=[
+            make_file_reference("outputs/hms.dss", asset_key="hms-output-dss"),
+            make_file_reference("outputs/wse.tif", asset_key="wse"),
+        ],
+        stages=[
+            StageRun(
+                stage=StageName.HYDROLOGIC,
+                status=RunStatus.SUCCEEDED,
+                started_at=UTC_START,
+                completed_at=UTC_START + timedelta(minutes=10),
+                output_asset_keys=["hms-output-dss"],
+                quality=QualitySummary(status=QualityStatus.PASSED),
+            ),
+            StageRun(
+                stage=StageName.HYDRAULIC,
+                status=RunStatus.SUCCEEDED,
+                started_at=UTC_START + timedelta(minutes=11),
+                completed_at=completed_at,
+                output_asset_keys=["wse"],
+                quality=QualitySummary(status=QualityStatus.PASSED),
+            ),
+        ],
         quality=QualitySummary(status=QualityStatus.PASSED),
     )
 
@@ -214,7 +275,47 @@ def test_schema_exposes_version_and_required_run_fields() -> None:
 
 def test_packaged_schema_matches_python_model() -> None:
     """Fail when a model change is committed without regenerating its schema."""
-    schema_path = files("stormhub.scenarios").joinpath("schemas/scenario-run-v1.0.0.schema.json")
+    schema_path = files("stormhub.scenarios").joinpath("schemas/scenario-run-v2.0.0.schema.json")
     packaged_schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
     assert packaged_schema == scenario_run_schema()
+
+
+def test_integrated_workflow_requires_hydrologic_stage_and_mapping() -> None:
+    """Reject partial integrated specifications before an orchestrator submits them."""
+    payload = make_spec().model_dump()
+    payload["hydrologic"] = None
+
+    with pytest.raises(ValidationError, match="hydrologic stage is required"):
+        ScenarioRunSpec.model_validate(payload)
+
+    payload = make_spec().model_dump()
+    payload["hydraulic"]["boundary_mappings"] = []
+    with pytest.raises(ValidationError, match="at least one HMS-to-RAS boundary mapping"):
+        ScenarioRunSpec.model_validate(payload)
+
+
+def test_succeeded_run_requires_complete_stage_provenance() -> None:
+    """Do not mark an integrated run successful when the HMS stage is absent."""
+    run = new_scenario_run(make_spec(), created_at=UTC_START)
+    payload = run.model_dump()
+    payload.update(
+        {
+            "status": RunStatus.SUCCEEDED,
+            "started_at": UTC_START,
+            "completed_at": UTC_START + timedelta(minutes=30),
+            "outputs": [make_file_reference("outputs/wse.tif", asset_key="wse").model_dump()],
+            "stages": [
+                StageRun(
+                    stage=StageName.HYDRAULIC,
+                    status=RunStatus.SUCCEEDED,
+                    started_at=UTC_START,
+                    completed_at=UTC_START + timedelta(minutes=30),
+                    output_asset_keys=["wse"],
+                ).model_dump()
+            ],
+        }
+    )
+
+    with pytest.raises(ValidationError, match="missing stage records"):
+        ScenarioRun.model_validate(payload)

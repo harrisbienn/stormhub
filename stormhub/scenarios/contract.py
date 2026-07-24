@@ -1,4 +1,4 @@
-"""Versioned data contract for reproducible hydraulic scenario runs."""
+"""Versioned data contract for reproducible hydrologic-hydraulic scenario runs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "2.0.0"
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Identifier = Annotated[
@@ -29,7 +29,7 @@ class ContractModel(BaseModel):
 
 
 class RunStatus(str, Enum):
-    """Lifecycle states for one hydraulic model execution."""
+    """Lifecycle states for an integrated run or one model stage."""
 
     PLANNED = "planned"
     QUEUED = "queued"
@@ -46,6 +46,20 @@ class QualityStatus(str, Enum):
     PASSED = "passed"
     WARNING = "warning"
     FAILED = "failed"
+
+
+class WorkflowKind(str, Enum):
+    """Supported model-stage topologies."""
+
+    HYDROLOGIC_HYDRAULIC = "hydrologic_hydraulic"
+    HYDRAULIC_ONLY = "hydraulic_only"
+
+
+class StageName(str, Enum):
+    """Stable names for model stages recorded in run provenance."""
+
+    HYDROLOGIC = "hydrologic"
+    HYDRAULIC = "hydraulic"
 
 
 def _validate_href(value: str | None) -> str | None:
@@ -148,6 +162,17 @@ class HydraulicModel(ContractModel):
     package: FileReference
 
 
+class HydrologicModel(ContractModel):
+    """Versioned hydrologic model package and selected HMS run."""
+
+    model_id: Identifier
+    model_version: NonEmptyString
+    engine: NonEmptyString = "HEC-HMS"
+    engine_version: NonEmptyString
+    run_name: NonEmptyString
+    package: FileReference
+
+
 class SoftwareProvenance(ContractModel):
     """Code and runtime identity used to execute a scenario."""
 
@@ -168,7 +193,7 @@ class SoftwareProvenance(ContractModel):
 
 
 class ExecutionSpec(ContractModel):
-    """Runner configuration that can affect hydraulic results."""
+    """Runner configuration that can affect a model stage's results."""
 
     runner: NonEmptyString
     software: SoftwareProvenance
@@ -187,14 +212,71 @@ class AntecedentConditions(ContractModel):
     _utc_as_of = field_validator("as_of")(_validate_utc)
 
 
-class ScenarioRunSpec(ContractModel):
-    """Immutable, result-defining inputs for one hydraulic execution."""
+class HydrologicBoundaryMapping(ContractModel):
+    """Explicit link from one HMS result pathname to one RAS boundary."""
 
+    mapping_id: Identifier
+    hms_element: NonEmptyString
+    hms_parameter: NonEmptyString = "FLOW"
+    hms_dss_pathname: NonEmptyString
+    ras_boundary_id: Identifier
+    ras_boundary_type: NonEmptyString
+    ras_location: dict[str, NonEmptyString] = Field(min_length=1)
+    units: NonEmptyString
+    interval_minutes: int = Field(gt=0)
+
+
+class HydrologicStageSpec(ContractModel):
+    """Result-defining HMS model and execution configuration."""
+
+    model: HydrologicModel
+    execution: ExecutionSpec
+
+
+class HydraulicStageSpec(ContractModel):
+    """Result-defining RAS model, execution, and upstream mappings."""
+
+    model: HydraulicModel
+    execution: ExecutionSpec
+    boundary_mappings: list[HydrologicBoundaryMapping] = Field(default_factory=list)
+
+    @field_validator("boundary_mappings")
+    @classmethod
+    def mapping_ids_are_unique(
+        cls,
+        value: list[HydrologicBoundaryMapping],
+    ) -> list[HydrologicBoundaryMapping]:
+        """Reject mappings that could overwrite one another during handoff."""
+        mapping_ids = [mapping.mapping_id for mapping in value]
+        if len(mapping_ids) != len(set(mapping_ids)):
+            raise ValueError("boundary mapping IDs must be unique")
+        boundary_ids = [mapping.ras_boundary_id for mapping in value]
+        if len(boundary_ids) != len(set(boundary_ids)):
+            raise ValueError("RAS boundary IDs must be unique")
+        return value
+
+
+class ScenarioRunSpec(ContractModel):
+    """Immutable inputs for one hydraulic-only or HMS-to-RAS execution."""
+
+    workflow: WorkflowKind
     watershed: WatershedReference
     precipitation: PrecipitationInput
-    hydraulic_model: HydraulicModel
-    execution: ExecutionSpec
+    hydrologic: HydrologicStageSpec | None = None
+    hydraulic: HydraulicStageSpec
     antecedent_conditions: AntecedentConditions | None = None
+
+    @model_validator(mode="after")
+    def stages_match_workflow(self) -> ScenarioRunSpec:
+        """Require an explicit, internally consistent stage topology."""
+        if self.workflow == WorkflowKind.HYDROLOGIC_HYDRAULIC:
+            if self.hydrologic is None:
+                raise ValueError("hydrologic stage is required for hydrologic_hydraulic workflow")
+            if not self.hydraulic.boundary_mappings:
+                raise ValueError("at least one HMS-to-RAS boundary mapping is required")
+        elif self.hydrologic is not None:
+            raise ValueError("hydrologic stage is not valid for hydraulic_only workflow")
+        return self
 
     def sha256(self) -> str:
         """Return a deterministic digest of all result-defining inputs."""
@@ -227,6 +309,48 @@ class FailureDetails(ContractModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class StageRun(ContractModel):
+    """Lifecycle and output references for one model stage."""
+
+    stage: StageName
+    status: RunStatus
+    started_at: AwareDatetime | None = None
+    completed_at: AwareDatetime | None = None
+    output_asset_keys: list[Identifier] = Field(default_factory=list)
+    quality: QualitySummary = Field(default_factory=QualitySummary)
+    failure: FailureDetails | None = None
+
+    _utc_started = field_validator("started_at")(_validate_utc)
+    _utc_completed = field_validator("completed_at")(_validate_utc)
+
+    @model_validator(mode="after")
+    def validate_lifecycle(self) -> StageRun:
+        """Require sufficient provenance for the declared stage state."""
+        terminal = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}
+        started = terminal | {RunStatus.RUNNING}
+        if self.status in started and self.started_at is None:
+            raise ValueError(f"started_at is required for stage status '{self.status.value}'")
+        if self.status in terminal and self.completed_at is None:
+            raise ValueError(f"completed_at is required for stage status '{self.status.value}'")
+        if self.completed_at and self.started_at and self.completed_at < self.started_at:
+            raise ValueError("stage completed_at cannot precede started_at")
+        if len(self.output_asset_keys) != len(set(self.output_asset_keys)):
+            raise ValueError("stage output asset keys must be unique")
+
+        if self.status == RunStatus.SUCCEEDED:
+            if not self.output_asset_keys:
+                raise ValueError("a succeeded stage must reference at least one output asset")
+            if self.failure is not None:
+                raise ValueError("a succeeded stage cannot contain failure details")
+            if self.quality.status == QualityStatus.FAILED:
+                raise ValueError("a succeeded stage cannot have failed quality status")
+        elif self.status == RunStatus.FAILED and self.failure is None:
+            raise ValueError("a failed stage must contain failure details")
+        elif self.status not in {RunStatus.FAILED, RunStatus.CANCELLED} and self.failure is not None:
+            raise ValueError("stage failure details are only valid for failed or cancelled stages")
+        return self
+
+
 class ScenarioRun(ContractModel):
     """Versioned manifest for one planned or completed scenario run."""
 
@@ -238,6 +362,7 @@ class ScenarioRun(ContractModel):
     created_at: AwareDatetime
     started_at: AwareDatetime | None = None
     completed_at: AwareDatetime | None = None
+    stages: list[StageRun] = Field(default_factory=list)
     outputs: list[FileReference] = Field(default_factory=list)
     quality: QualitySummary = Field(default_factory=QualitySummary)
     failure: FailureDetails | None = None
@@ -255,13 +380,26 @@ class ScenarioRun(ContractModel):
 
         asset_keys = [
             self.spec.precipitation.transposed_dss.asset_key,
-            self.spec.hydraulic_model.package.asset_key,
+            self.spec.hydraulic.model.package.asset_key,
             *(output.asset_key for output in self.outputs),
         ]
+        if self.spec.hydrologic is not None:
+            asset_keys.append(self.spec.hydrologic.model.package.asset_key)
         if "scenario-run" in asset_keys:
             raise ValueError("asset key 'scenario-run' is reserved for the contract manifest")
         if len(asset_keys) != len(set(asset_keys)):
             raise ValueError("DSS, model package, and output asset keys must be unique")
+
+        stage_names = [stage.stage for stage in self.stages]
+        if len(stage_names) != len(set(stage_names)):
+            raise ValueError("model stages must be unique")
+        output_asset_keys = {output.asset_key for output in self.outputs}
+        for stage in self.stages:
+            unknown = set(stage.output_asset_keys) - output_asset_keys
+            if unknown:
+                raise ValueError(
+                    f"stage '{stage.stage.value}' references unknown output assets: {sorted(unknown)}"
+                )
 
         terminal = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}
         started = terminal | {RunStatus.RUNNING}
@@ -277,6 +415,25 @@ class ScenarioRun(ContractModel):
         if self.status == RunStatus.SUCCEEDED:
             if not self.outputs:
                 raise ValueError("a succeeded run must contain at least one output")
+            required_stages = {StageName.HYDRAULIC}
+            if self.spec.workflow == WorkflowKind.HYDROLOGIC_HYDRAULIC:
+                required_stages.add(StageName.HYDROLOGIC)
+            stages_by_name = {stage.stage: stage for stage in self.stages}
+            missing_stages = required_stages - set(stages_by_name)
+            if missing_stages:
+                raise ValueError(
+                    f"a succeeded run is missing stage records: "
+                    f"{sorted(stage.value for stage in missing_stages)}"
+                )
+            incomplete_stages = [
+                stage.value
+                for stage in required_stages
+                if stages_by_name[stage].status != RunStatus.SUCCEEDED
+            ]
+            if incomplete_stages:
+                raise ValueError(
+                    f"a succeeded run requires succeeded stages: {sorted(incomplete_stages)}"
+                )
             if self.failure is not None:
                 raise ValueError("a succeeded run cannot contain failure details")
             if self.quality.status == QualityStatus.FAILED:
