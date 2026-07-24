@@ -2,9 +2,9 @@ Scenario Run Contract
 =====================
 
 The scenario run contract is the handoff between precipitation preparation,
-hydraulic-model automation, quality control, and STAC publication. It records
-one planned or completed hydraulic execution without embedding the files
-themselves.
+hydrologic-model automation, hydraulic-model automation, quality control, and
+STAC publication. It records one planned or completed integrated execution
+without embedding the files themselves.
 
 The contract complements STAC rather than replacing it:
 
@@ -13,13 +13,13 @@ The contract complements STAC rather than replacing it:
   results.
 * ``ScenarioRun`` adds lifecycle state, output files, quality checks, and
   machine-readable failure details.
-* A future hydraulic-run STAC Item should include the completed manifest as an
-  Asset and link to its precipitation Item with ``derived_from``.
+* A published flood-run STAC Item includes the completed manifest as an Asset
+  and links to its precipitation Item with ``derived_from``.
 
 Contract guarantees
 -------------------
 
-Version 1.0.0 provides the following guarantees:
+Version 2.0.0 provides the following guarantees:
 
 * Unknown fields are rejected so misspellings do not silently lose metadata.
 * All timestamps are timezone-aware UTC values.
@@ -29,14 +29,21 @@ Version 1.0.0 provides the following guarantees:
   STAC; keys must be unique within a run.
 * Hrefs must be portable relative paths or absolute IRIs, not Windows paths.
 * The immutable run specification has a canonical SHA-256 digest.
+* The workflow explicitly distinguishes direct hydraulic and integrated
+  hydrologic-hydraulic runs.
+* Integrated runs require a versioned HMS model, a versioned RAS model, and at
+  least one explicit HMS-DSS-to-RAS-boundary mapping.
+* Stage lifecycle records identify the outputs and QAQC state produced by HMS
+  and RAS independently.
 * Terminal lifecycle states require the timestamps and records needed to
   explain their outcome.
 * A successful run requires at least one output and cannot have failed QC.
 
 The ``specification_sha256`` value is an idempotency key. An orchestrator can
 detect that an identical specification has already been submitted and avoid an
-accidental duplicate HEC-RAS execution. Run status, logs, outputs, and QC are
-excluded from this digest because they describe the execution, not its inputs.
+accidental duplicate HMS/RAS execution. Run status, stage status, logs,
+outputs, and QC are excluded from this digest because they describe the
+execution, not its inputs.
 
 Creating a run
 --------------
@@ -49,10 +56,11 @@ use ``new_scenario_run`` to calculate its identity::
    from stormhub.scenarios import ScenarioRunSpec, new_scenario_run, write_scenario_run
 
    spec = ScenarioRunSpec(
+       workflow="hydrologic_hydraulic",
        watershed=watershed,
        precipitation=precipitation,
-       hydraulic_model=hydraulic_model,
-       execution=execution,
+       hydrologic=hydrologic_stage,
+       hydraulic=hydraulic_stage,
    )
    run = new_scenario_run(spec, created_at=datetime.now(timezone.utc))
    write_scenario_run(run, "runs/scenario-run.json")
@@ -72,34 +80,28 @@ requested watershed and that DSS validation passed::
    from pathlib import Path
 
    from stormhub.scenarios import (
-       HydraulicModel,
-       file_reference_from_path,
+       HydraulicStageSpec,
+       HydrologicStageSpec,
        new_scenario_run,
        scenario_run_spec_from_stac,
        write_scenario_run,
    )
 
    manifest_path = Path("runs") / "pending" / "scenario-run.json"
-   model_package = file_reference_from_path(
-       "models/lwi-r3-ras.zip",
-       manifest_path,
-       asset_key="hydraulic-model",
-       media_type="application/zip",
-       roles=["data", "model"],
-   )
-   hydraulic_model = HydraulicModel(
-       model_id="lwi-r3-ras",
-       model_version="2026.07",
-       engine_version="6.6",
-       plan_name="forecast-plan",
-       package=model_package,
+   # hms_model and ras_model contain checksum-pinned model package references.
+   # verified_boundary_mappings contain exact HMS DSS and RAS boundary IDs.
+   hydrologic_stage = HydrologicStageSpec(model=hms_model, execution=hms_execution)
+   hydraulic_stage = HydraulicStageSpec(
+       model=ras_model,
+       execution=ras_execution,
+       boundary_mappings=verified_boundary_mappings,
    )
    spec = scenario_run_spec_from_stac(
        storm_item,
        watershed_item,
-       hydraulic_model,
-       execution,
+       hydraulic_stage,
        manifest_path,
+       hydrologic=hydrologic_stage,
    )
    run = new_scenario_run(spec)
    write_scenario_run(run, manifest_path)
@@ -109,11 +111,11 @@ a ``passed`` DSS validation status, matching ``stormhub:target_watershed_id``,
 and a valid local checksum. These are submission gates, not merely descriptive
 metadata. Disable them only for explicit migration or diagnostic workflows.
 
-Publishing hydraulic runs
--------------------------
+Publishing integrated flood runs
+--------------------------------
 
 ``publish_scenario_run`` writes the final manifest and publishes a STAC Item
-into a ``hydraulic-scenario-runs`` Collection::
+into a ``flood-scenario-runs`` Collection::
 
    import pystac
 
@@ -128,10 +130,11 @@ into a ``hydraulic-scenario-runs`` Collection::
    )
 
 The publisher creates the Collection when necessary and writes Items under
-``hydraulic-scenario-runs/<run-id>/``. Each Item contains:
+``flood-scenario-runs/<run-id>/``. Each Item contains:
 
 * the versioned scenario manifest;
 * the watershed-transposed DSS input;
+* the versioned hydrologic model package when present;
 * the versioned hydraulic model package;
 * every declared output, such as WSE, depth, velocity, HDF, logs, or reports;
 * a ``derived_from`` link to the precipitation scenario; and
@@ -155,8 +158,10 @@ without forcing every possible hydraulic product into the core contract.
 Schema and compatibility
 ------------------------
 
-The packaged JSON Schema is
-``stormhub/scenarios/schemas/scenario-run-v1.0.0.schema.json``. Non-Python
+The current packaged JSON Schema is
+``stormhub/scenarios/schemas/scenario-run-v2.0.0.schema.json``. The historical
+``scenario-run-v1.0.0.schema.json`` remains packaged for readers of previously
+published manifests. Non-Python
 workers can validate manifests against this file. Python producers should use
 the Pydantic models, which are also the source used to generate the schema.
 
@@ -165,6 +170,11 @@ minor change. Removing fields, changing meaning, or making an optional field
 required is a major change. Readers should select a model by
 ``contract_version`` rather than assuming the newest model can parse every
 historical manifest.
+
+Version 2.0.0 is a deliberate breaking change from the single hydraulic-stage
+1.0.0 model. ``ScenarioRunSpec`` now groups model and execution provenance into
+``hydrologic`` and ``hydraulic`` stage specifications and records an explicit
+``workflow``.
 
 Extension policy
 ----------------
