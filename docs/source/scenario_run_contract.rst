@@ -19,7 +19,7 @@ The contract complements STAC rather than replacing it:
 Contract guarantees
 -------------------
 
-Version 2.0.0 provides the following guarantees:
+Version 2.1.0 provides the following guarantees:
 
 * Unknown fields are rejected so misspellings do not silently lose metadata.
 * All timestamps are timezone-aware UTC values.
@@ -38,6 +38,12 @@ Version 2.0.0 provides the following guarantees:
 * Terminal lifecycle states require the timestamps and records needed to
   explain their outcome.
 * A successful run requires at least one output and cannot have failed QC.
+* HMS execution, hydrologic handoff, RAS execution, and hydraulic QA/QC are
+  separate typed qualification gates.
+* Publication disposition is independent from run completion and defaults to
+  ``prohibited``.
+* ``candidate`` and ``eligible`` publication requires a successful run and a
+  ``pass`` result for every workflow-required qualification gate.
 
 The ``specification_sha256`` value is an idempotency key. An orchestrator can
 detect that an identical specification has already been submitted and avoid an
@@ -145,23 +151,74 @@ retain their manifest and failure classification even when no hydraulic output
 was produced. Planned, queued, and running executions are rejected because
 their final provenance is incomplete.
 
+Catalog registration and forecast promotion are deliberately separate.
+Terminal Items may use these publication dispositions:
+
+* ``prohibited`` - retained as evidence and excluded from forecast guidance;
+* ``internal`` - available for engineering review only;
+* ``candidate`` - all automated gates passed and scientific review is pending;
+* ``eligible`` - explicitly approved for scenario-matching forecast use; and
+* ``retired`` - retained for provenance and excluded from new selection.
+
+The publisher exposes the four gate states, disposition, and a derived
+``stormhub:forecast_eligible`` Boolean as searchable Item properties. A
+failed, cancelled, conditional, or unevaluated run cannot be promoted merely
+because its files exist.
+
 Publication verifies local checksums and sizes by default. A duplicate run ID
 is rejected. ``overwrite=True`` permits an idempotent republication only when
 the existing Item has the same specification digest; it cannot replace an
 existing run with different inputs under the same identity.
 
 Output metadata using ``proj:`` or ``raster:`` fields automatically declares
-the corresponding STAC extension on the published Item. This allows gridded
+Projection 2.0 or the corresponding Raster extension on the published Item.
+Projection 2.0 preserves package-produced ``proj:code`` values even when
+StormHub is running on its pinned PySTAC 1.10/STAC 1.0 stack. This allows gridded
 WSE, depth, and velocity products to carry standards-based spatial metadata
 without forcing every possible hydraulic product into the core contract.
+Validated ``table:columns`` and ``table:row_count`` metadata similarly declares
+the Table extension for hydrographs. Partial Table metadata is rejected by the
+contract. The Datacube extension is not declared unless a future producer
+supplies a separately validated time-cube contract.
+
+The Collection declares the expected scenario-response Asset union through
+``item_assets``. Stable keys include:
+
+.. code-block:: text
+
+   scenario-run
+   scenario-products
+   qualification
+   target-precipitation-dss
+   hms-output-dss
+   hms-pathname-catalog
+   hms-hydrographs
+   ras-result-hdf
+   ras-hydrographs
+   maximum-wse
+   maximum-depth
+   maximum-velocity
+   hydraulic-time-cube
+   preview
+
+Assets that do not exist for a particular run are omitted from its Item. The
+Collection definition is the union of possible assets, not a claim that every
+run produced every asset. The publisher also retains definitions for observed
+model-package or extension assets so custom package keys remain discoverable.
+
+The source precipitation Item's ``dss-target`` key and the response catalog's
+``target-precipitation-dss`` key serve different scopes. The response Asset
+records the original source key in ``stormhub:source_asset_key`` and keeps the
+Item-level ``derived_from`` link. Publication does not edit the source Item.
 
 Schema and compatibility
 ------------------------
 
 The current packaged JSON Schema is
-``stormhub/scenarios/schemas/scenario-run-v2.0.0.schema.json``. The historical
-``scenario-run-v1.0.0.schema.json`` remains packaged for readers of previously
-published manifests. Non-Python
+``stormhub/scenarios/schemas/scenario-run-v2.1.0.schema.json``. Historical
+``scenario-run-v1.0.0.schema.json`` and
+``scenario-run-v2.0.0.schema.json`` files remain packaged for readers of
+previously published manifests. Non-Python
 workers can validate manifests against this file. Python producers should use
 the Pydantic models, which are also the source used to generate the schema.
 
@@ -171,7 +228,12 @@ required is a major change. Readers should select a model by
 ``contract_version`` rather than assuming the newest model can parse every
 historical manifest.
 
-Version 2.0.0 is a deliberate breaking change from the single hydraulic-stage
+Version 2.1.0 is additive over 2.0.0. The Python reader accepts a 2.0.0
+manifest and supplies conservative qualification defaults: every gate is
+``not_evaluated`` and publication is ``prohibited``. New manifests emit
+2.1.0.
+
+Version 2.0.0 was a deliberate breaking change from the single hydraulic-stage
 1.0.0 model. ``ScenarioRunSpec`` now groups model and execution provenance into
 ``hydrologic`` and ``hydraulic`` stage specifications and records an explicit
 ``workflow``.

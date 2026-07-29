@@ -2,6 +2,7 @@
 
 from stormhub.scenarios.contract import (
     CONTRACT_VERSION,
+    COMPATIBLE_CONTRACT_VERSIONS,
     AntecedentConditions,
     ExecutionSpec,
     FailureDetails,
@@ -15,6 +16,10 @@ from stormhub.scenarios.contract import (
     QualityCheck,
     QualityStatus,
     QualitySummary,
+    QualificationGate,
+    QualificationStatus,
+    QualificationSummary,
+    PublicationDisposition,
     RunStatus,
     ScenarioRun,
     ScenarioRunSpec,
@@ -37,12 +42,15 @@ from stormhub.scenarios.stac import (
 )
 from stormhub.scenarios.publisher import (
     DEFAULT_COLLECTION_ID,
+    SCENARIO_RESPONSE_ITEM_ASSETS,
+    TARGET_PRECIPITATION_ASSET_KEY,
     publish_scenario_run,
     scenario_run_to_stac_item,
 )
 
 __all__ = [
     "CONTRACT_VERSION",
+    "COMPATIBLE_CONTRACT_VERSIONS",
     "AntecedentConditions",
     "ExecutionSpec",
     "FailureDetails",
@@ -56,6 +64,10 @@ __all__ = [
     "QualityCheck",
     "QualityStatus",
     "QualitySummary",
+    "QualificationGate",
+    "QualificationStatus",
+    "QualificationSummary",
+    "PublicationDisposition",
     "RunStatus",
     "ScenarioRun",
     "ScenarioRunSpec",
@@ -74,6 +86,8 @@ __all__ = [
     "geometry_sha256",
     "scenario_run_spec_from_stac",
     "DEFAULT_COLLECTION_ID",
+    "SCENARIO_RESPONSE_ITEM_ASSETS",
+    "TARGET_PRECIPITATION_ASSET_KEY",
     "publish_scenario_run",
     "scenario_run_to_stac_item",
 ]
