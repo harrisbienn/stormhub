@@ -9,10 +9,16 @@ from urllib.parse import urlsplit
 
 import pystac
 from pystac.extensions.file import FileExtension
-from pystac.extensions.projection import ProjectionExtension
+from pystac.extensions.item_assets import ItemAssetsExtension
 from pystac.extensions.raster import RasterExtension
 
-from stormhub.scenarios.contract import FileReference, RunStatus, ScenarioRun, write_scenario_run
+from stormhub.scenarios.contract import (
+    FileReference,
+    PublicationDisposition,
+    RunStatus,
+    ScenarioRun,
+    write_scenario_run,
+)
 from stormhub.scenarios.stac import geometry_sha256
 from stormhub.utils import sha256_file, sha256_multihash
 
@@ -20,6 +26,97 @@ DEFAULT_COLLECTION_ID = "flood-scenario-runs"
 DEFAULT_COLLECTION_DESCRIPTION = (
     "Hydrologic-hydraulic model executions derived from StormHub precipitation scenarios."
 )
+TARGET_PRECIPITATION_ASSET_KEY = "target-precipitation-dss"
+TABLE_EXTENSION_SCHEMA = "https://stac-extensions.github.io/table/v1.2.0/schema.json"
+PROJECTION_EXTENSION_SCHEMA = "https://stac-extensions.github.io/projection/v2.0.0/schema.json"
+ITEM_ASSETS_EXTENSION_SCHEMA = ItemAssetsExtension.get_schema_uri()
+
+SCENARIO_RESPONSE_ITEM_ASSETS = {
+    "scenario-run": {
+        "title": "Scenario run manifest",
+        "description": "Versioned immutable-input and terminal-execution contract.",
+        "type": pystac.MediaType.JSON,
+        "roles": ["metadata"],
+    },
+    "scenario-products": {
+        "title": "Scenario product manifest",
+        "description": "Portable identities and metadata for the assembled response products.",
+        "type": pystac.MediaType.JSON,
+        "roles": ["metadata", "product-manifest"],
+    },
+    "qualification": {
+        "title": "Scenario qualification",
+        "description": "Evidence supporting the four integrated qualification gates.",
+        "type": pystac.MediaType.JSON,
+        "roles": ["metadata", "quality"],
+    },
+    TARGET_PRECIPITATION_ASSET_KEY: {
+        "title": "Watershed-transposed precipitation DSS",
+        "description": "StormHub precipitation forcing used by the hydrologic-hydraulic run.",
+        "type": "application/x-dss",
+        "roles": ["data", "input", "precipitation"],
+    },
+    "hms-output-dss": {
+        "title": "HEC-HMS output DSS",
+        "description": "Authoritative HEC-HMS results used for the hydraulic handoff.",
+        "type": "application/x-dss",
+        "roles": ["data", "hydrologic-output"],
+    },
+    "hms-pathname-catalog": {
+        "title": "HMS pathname qualification catalog",
+        "description": "Qualified DSS pathname inventory for required HEC-RAS boundaries.",
+        "type": pystac.MediaType.JSON,
+        "roles": ["metadata", "quality", "hydrologic-handoff"],
+    },
+    "hms-hydrographs": {
+        "title": "HMS hydrographs",
+        "description": "Portable hydrologic time series for the required boundary mappings.",
+        "type": "application/vnd.apache.parquet",
+        "roles": ["data", "hydrograph", "hydrologic-output"],
+    },
+    "ras-result-hdf": {
+        "title": "HEC-RAS result HDF",
+        "description": "Authoritative HEC-RAS plan result.",
+        "type": "application/x-hdf5",
+        "roles": ["data", "hydraulic-output", "engineering-result"],
+    },
+    "ras-hydrographs": {
+        "title": "RAS hydrographs",
+        "description": "Portable hydraulic boundary flow and stage time series.",
+        "type": "application/vnd.apache.parquet",
+        "roles": ["data", "hydrograph", "hydraulic-output"],
+    },
+    "maximum-wse": {
+        "title": "Maximum water-surface elevation",
+        "description": "Cloud-optimized GeoTIFF of maximum modeled water-surface elevation.",
+        "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+        "roles": ["data", "visual", "maximum-wse"],
+    },
+    "maximum-depth": {
+        "title": "Maximum depth",
+        "description": "Cloud-optimized GeoTIFF of maximum modeled depth.",
+        "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+        "roles": ["data", "visual", "maximum-depth"],
+    },
+    "maximum-velocity": {
+        "title": "Maximum velocity",
+        "description": "Cloud-optimized GeoTIFF of maximum modeled velocity.",
+        "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+        "roles": ["data", "visual", "maximum-velocity"],
+    },
+    "hydraulic-time-cube": {
+        "title": "Hydraulic time cube",
+        "description": "Validated chunked time-varying hydraulic raster product.",
+        "type": "application/vnd+zarr",
+        "roles": ["data", "hydraulic-output"],
+    },
+    "preview": {
+        "title": "Scenario preview",
+        "description": "Browse image for rapid inspection of the scenario response.",
+        "type": "image/png",
+        "roles": ["overview", "visual"],
+    },
+}
 
 
 def _is_remote_href(href: str) -> bool:
@@ -84,9 +181,36 @@ def _declare_asset_extensions(item: pystac.Item, references: list[FileReference]
     """Declare known STAC extensions used by contract asset metadata."""
     metadata_keys = {key for reference in references for key in reference.metadata}
     if any(key.startswith("proj:") for key in metadata_keys):
-        ProjectionExtension.add_to(item)
+        item.stac_extensions.append(PROJECTION_EXTENSION_SCHEMA)
     if any(key.startswith("raster:") for key in metadata_keys):
         RasterExtension.add_to(item)
+    if any(key.startswith("table:") for key in metadata_keys):
+        item.stac_extensions.append(TABLE_EXTENSION_SCHEMA)
+
+
+def _item_asset_definition(asset: pystac.Asset) -> dict[str, object]:
+    """Build a Collection definition for an observed nonstandard asset key."""
+    definition: dict[str, object] = {}
+    if asset.title:
+        definition["title"] = asset.title
+    if asset.media_type:
+        definition["type"] = asset.media_type
+    if asset.roles:
+        definition["roles"] = list(asset.roles)
+    return definition
+
+
+def _update_collection_item_assets(collection: pystac.Collection, item: pystac.Item) -> None:
+    """Maintain the stable union of expected and observed scenario assets."""
+    definitions = dict(collection.extra_fields.get("item_assets", {}))
+    definitions.update(
+        {key: dict(definition) for key, definition in SCENARIO_RESPONSE_ITEM_ASSETS.items()}
+    )
+    for key, asset in item.assets.items():
+        definitions.setdefault(key, _item_asset_definition(asset))
+    collection.extra_fields["item_assets"] = definitions
+    if ITEM_ASSETS_EXTENSION_SCHEMA not in collection.stac_extensions:
+        collection.stac_extensions.append(ITEM_ASSETS_EXTENSION_SCHEMA)
 
 
 def _validate_publishable_run(run: ScenarioRun, watershed_item: pystac.Item) -> None:
@@ -162,6 +286,12 @@ def scenario_run_to_stac_item(
             stage.stage.value: stage.status.value for stage in run.stages
         },
         "stormhub:quality_status": run.quality.status.value,
+        "stormhub:hms_execution": run.qualification.hms_execution.status.value,
+        "stormhub:hydrologic_handoff": run.qualification.hydrologic_handoff.status.value,
+        "stormhub:ras_execution": run.qualification.ras_execution.status.value,
+        "stormhub:hydraulic_qaqc": run.qualification.hydraulic_qaqc.status.value,
+        "stormhub:publication": run.publication.value,
+        "stormhub:forecast_eligible": run.publication == PublicationDisposition.ELIGIBLE,
         "stormhub:labels": run.labels,
     }
     if run.spec.hydrologic is not None:
@@ -230,13 +360,16 @@ def scenario_run_to_stac_item(
     if dss_size is not None:
         dss_fields["file:size"] = dss_size
     item.add_asset(
-        target_dss.asset_key,
+        TARGET_PRECIPITATION_ASSET_KEY,
         pystac.Asset(
             href=_publication_href(target_dss.asset_href, manifest, output_item_path),
             title="Watershed-transposed precipitation DSS",
             media_type="application/x-dss",
             roles=["data", "input", "precipitation"],
-            extra_fields=dss_fields,
+            extra_fields={
+                **dss_fields,
+                "stormhub:source_asset_key": target_dss.asset_key,
+            },
         ),
     )
     item.add_asset(
@@ -327,6 +460,7 @@ def publish_scenario_run(
     elif existing is not None:
         collection.remove_item(run.run_id)
 
+    _update_collection_item_assets(collection, item)
     collection.add_item(item)
     item.save_object(include_self_link=False)
     collection.update_extent_from_items()

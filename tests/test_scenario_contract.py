@@ -19,8 +19,12 @@ from stormhub.scenarios import (
     HydrologicModel,
     HydrologicStageSpec,
     PrecipitationInput,
+    PublicationDisposition,
     QualityStatus,
     QualitySummary,
+    QualificationGate,
+    QualificationStatus,
+    QualificationSummary,
     RunStatus,
     ScenarioRun,
     ScenarioRunSpec,
@@ -140,6 +144,38 @@ def rebuild_run(run: ScenarioRun, **updates) -> ScenarioRun:
     payload = run.model_dump()
     payload.update(updates)
     return ScenarioRun.model_validate(payload)
+
+
+def make_succeeded_run() -> ScenarioRun:
+    """Build a complete integrated run for qualification-policy tests."""
+    run = new_scenario_run(make_spec(), created_at=UTC_START)
+    completed_at = UTC_START + timedelta(minutes=30)
+    return rebuild_run(
+        run,
+        status=RunStatus.SUCCEEDED,
+        started_at=UTC_START,
+        completed_at=completed_at,
+        outputs=[
+            make_file_reference("outputs/hms.dss", asset_key="hms-output-dss"),
+            make_file_reference("outputs/wse.tif", asset_key="wse"),
+        ],
+        stages=[
+            StageRun(
+                stage=StageName.HYDROLOGIC,
+                status=RunStatus.SUCCEEDED,
+                started_at=UTC_START,
+                completed_at=UTC_START + timedelta(minutes=10),
+                output_asset_keys=["hms-output-dss"],
+            ),
+            StageRun(
+                stage=StageName.HYDRAULIC,
+                status=RunStatus.SUCCEEDED,
+                started_at=UTC_START + timedelta(minutes=11),
+                completed_at=completed_at,
+                output_asset_keys=["wse"],
+            ),
+        ],
+    )
 
 
 def test_new_run_has_deterministic_identity() -> None:
@@ -269,13 +305,13 @@ def test_schema_exposes_version_and_required_run_fields() -> None:
     """Expose a JSON Schema for non-Python producers and consumers."""
     schema = scenario_run_schema()
 
-    assert schema["properties"]["contract_version"]["const"] == CONTRACT_VERSION
+    assert CONTRACT_VERSION in schema["properties"]["contract_version"]["enum"]
     assert {"run_id", "specification_sha256", "spec", "created_at"}.issubset(schema["required"])
 
 
 def test_packaged_schema_matches_python_model() -> None:
     """Fail when a model change is committed without regenerating its schema."""
-    schema_path = files("stormhub.scenarios").joinpath("schemas/scenario-run-v2.0.0.schema.json")
+    schema_path = files("stormhub.scenarios").joinpath("schemas/scenario-run-v2.1.0.schema.json")
     packaged_schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
     assert packaged_schema == scenario_run_schema()
@@ -319,3 +355,63 @@ def test_succeeded_run_requires_complete_stage_provenance() -> None:
 
     with pytest.raises(ValidationError, match="missing stage records"):
         ScenarioRun.model_validate(payload)
+
+
+def test_contract_reads_v2_manifest_with_conservative_publication_defaults() -> None:
+    """Read 2.0 manifests without implicitly promoting their prior results."""
+    payload = new_scenario_run(make_spec(), created_at=UTC_START).model_dump(mode="json")
+    payload["contract_version"] = "2.0.0"
+    payload.pop("qualification")
+    payload.pop("publication")
+
+    restored = ScenarioRun.model_validate(payload)
+
+    assert restored.contract_version == "2.0.0"
+    assert restored.publication == PublicationDisposition.PROHIBITED
+    assert restored.qualification.hms_execution.status == QualificationStatus.NOT_EVALUATED
+
+
+def test_forecast_promotion_requires_succeeded_run_and_all_gates_pass() -> None:
+    """Keep catalog registration separate from candidate or eligible promotion."""
+    run = make_succeeded_run()
+    payload = run.model_dump()
+    payload["publication"] = PublicationDisposition.ELIGIBLE
+
+    with pytest.raises(ValidationError, match="all qualification gates to pass"):
+        ScenarioRun.model_validate(payload)
+
+    passed = QualificationGate(status=QualificationStatus.PASS)
+    payload["qualification"] = QualificationSummary(
+        hms_execution=passed,
+        hydrologic_handoff=passed,
+        ras_execution=passed,
+        hydraulic_qaqc=passed,
+    ).model_dump()
+    promoted = ScenarioRun.model_validate(payload)
+
+    assert promoted.publication == PublicationDisposition.ELIGIBLE
+
+
+def test_table_metadata_requires_complete_unique_column_contract() -> None:
+    """Reject partial Table extension metadata before it reaches STAC."""
+    with pytest.raises(ValidationError, match="missing required fields"):
+        FileReference.model_validate(
+            {
+                **make_file_reference().model_dump(),
+                "metadata": {"table:row_count": 3},
+            }
+        )
+
+    table = FileReference.model_validate(
+        {
+            **make_file_reference().model_dump(),
+            "metadata": {
+                "table:row_count": 3,
+                "table:columns": [
+                    {"name": "time", "type": "datetime"},
+                    {"name": "flow", "type": "float64"},
+                ],
+            },
+        }
+    )
+    assert table.metadata["table:row_count"] == 3

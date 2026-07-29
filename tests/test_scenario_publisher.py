@@ -17,8 +17,12 @@ from stormhub.scenarios import (
     HydrologicModel,
     HydrologicStageSpec,
     PrecipitationInput,
+    PublicationDisposition,
     QualityStatus,
     QualitySummary,
+    QualificationGate,
+    QualificationStatus,
+    QualificationSummary,
     RunStatus,
     ScenarioRun,
     ScenarioRunSpec,
@@ -28,6 +32,9 @@ from stormhub.scenarios import (
     StacAssetReference,
     WatershedReference,
     WorkflowKind,
+    SCENARIO_RESPONSE_ITEM_ASSETS,
+    TARGET_PRECIPITATION_ASSET_KEY,
+    FileReference,
     file_reference_from_path,
     geometry_sha256,
     load_scenario_run,
@@ -245,10 +252,144 @@ def make_terminal_run(
     return ScenarioRun.model_validate(payload), manifest_path, output_path
 
 
+def make_minimum_product_run(
+    root: Path,
+    watershed: pystac.Item,
+    precipitation_path: Path,
+) -> tuple[ScenarioRun, Path]:
+    """Build a prohibited conditional run with every required Sprint 3 product."""
+    run, manifest_path, _ = make_terminal_run(
+        root,
+        watershed,
+        precipitation_path,
+        run_id="scenario-all-products",
+    )
+    spatial_metadata = {
+        "proj:code": "EPSG:5070",
+        "proj:shape": [2, 2],
+        "proj:transform": [30.0, 0.0, 500000.0, 0.0, -30.0, 3500000.0],
+        "raster:bands": [{"data_type": "float32", "nodata": -9999.0, "unit": "ft"}],
+    }
+    table_metadata = {
+        "table:row_count": 2,
+        "table:columns": [
+            {"name": "time", "type": "string"},
+            {"name": "value", "type": "number"},
+        ],
+    }
+    products = [
+        ("scenario-products", "products.json", pystac.MediaType.JSON, ["metadata", "product-manifest"], {}),
+        ("qualification", "qualification.json", pystac.MediaType.JSON, ["metadata", "quality"], {}),
+        (
+            "hms-pathname-catalog",
+            "hms-pathnames.json",
+            pystac.MediaType.JSON,
+            ["metadata", "quality", "hydrologic-handoff"],
+            {},
+        ),
+        (
+            "hms-hydrographs",
+            "hms-hydrographs.parquet",
+            "application/vnd.apache.parquet",
+            ["data", "hydrograph", "hydrologic-output"],
+            table_metadata,
+        ),
+        (
+            "ras-result-hdf",
+            "ras-result.hdf",
+            "application/x-hdf5",
+            ["data", "hydraulic-output", "engineering-result"],
+            {},
+        ),
+        (
+            "ras-hydrographs",
+            "ras-hydrographs.parquet",
+            "application/vnd.apache.parquet",
+            ["data", "hydrograph", "hydraulic-output"],
+            table_metadata,
+        ),
+        (
+            "maximum-wse",
+            "maximum-wse.tif",
+            "image/tiff; application=geotiff; profile=cloud-optimized",
+            ["data", "visual", "maximum-wse"],
+            spatial_metadata,
+        ),
+        (
+            "maximum-depth",
+            "maximum-depth.tif",
+            "image/tiff; application=geotiff; profile=cloud-optimized",
+            ["data", "visual", "maximum-depth"],
+            spatial_metadata,
+        ),
+        (
+            "maximum-velocity",
+            "maximum-velocity.tif",
+            "image/tiff; application=geotiff; profile=cloud-optimized",
+            ["data", "visual", "maximum-velocity"],
+            spatial_metadata,
+        ),
+        ("preview", "preview.png", "image/png", ["overview", "visual"], {}),
+    ]
+    references = []
+    for key, filename, media_type, roles, metadata in products:
+        path = root / "outputs" / run.run_id / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"Sprint 3 fixture: {key}".encode())
+        references.append(
+            file_reference_from_path(
+                path,
+                manifest_path,
+                asset_key=key,
+                media_type=media_type,
+                roles=roles,
+                metadata=metadata,
+            )
+        )
+
+    hms_output = run.outputs[0]
+    outputs = [hms_output, *references]
+    all_pass = QualificationGate(status=QualificationStatus.PASS)
+    conditional_handoff = QualificationGate(
+        status=QualificationStatus.CONDITIONAL,
+        evidence_asset_keys=["hms-pathname-catalog", "hms-hydrographs"],
+        message="Qualification fixture retains a conditional hydrologic handoff.",
+    )
+    conditional_qaqc = QualificationGate(
+        status=QualificationStatus.CONDITIONAL,
+        evidence_asset_keys=["qualification", "maximum-depth"],
+        message="Qualification fixture retains conditional hydraulic QAQC.",
+    )
+    payload = run.model_dump()
+    payload["outputs"] = [reference.model_dump() for reference in outputs]
+    payload["stages"][0]["output_asset_keys"] = [
+        "hms-output-dss",
+        "hms-pathname-catalog",
+        "hms-hydrographs",
+    ]
+    payload["stages"][1]["output_asset_keys"] = [
+        "ras-result-hdf",
+        "ras-hydrographs",
+        "maximum-wse",
+        "maximum-depth",
+        "maximum-velocity",
+        "preview",
+    ]
+    payload["qualification"] = QualificationSummary(
+        hms_execution=all_pass,
+        hydrologic_handoff=conditional_handoff,
+        ras_execution=all_pass,
+        hydraulic_qaqc=conditional_qaqc,
+    ).model_dump()
+    payload["publication"] = PublicationDisposition.PROHIBITED
+    return ScenarioRun.model_validate(payload), manifest_path
+
+
 def test_publish_successful_run_creates_portable_catalog_tree(tmp_path: Path) -> None:
     """Publish inputs, outputs, manifest, properties, and provenance links."""
     catalog, watershed, precipitation_path = make_catalog_and_watershed(tmp_path)
     run, manifest_path, _ = make_terminal_run(tmp_path, watershed, precipitation_path)
+    source_item_bytes = precipitation_path.read_bytes()
 
     item = publish_scenario_run(catalog, run, manifest_path, watershed)
 
@@ -261,7 +402,7 @@ def test_publish_successful_run_creates_portable_catalog_tree(tmp_path: Path) ->
     saved_item = pystac.Item.from_file(str(item_path))
     assert set(saved_item.assets) == {
         "scenario-run",
-        "dss-target",
+        TARGET_PRECIPITATION_ASSET_KEY,
         "hydrologic-model",
         "hydraulic-model",
         "hms-output-dss",
@@ -276,6 +417,12 @@ def test_publish_successful_run_creates_portable_catalog_tree(tmp_path: Path) ->
         "hydraulic": "succeeded",
     }
     assert saved_item.properties["stormhub:quality_status"] == "passed"
+    assert saved_item.properties["stormhub:hms_execution"] == "not_evaluated"
+    assert saved_item.properties["stormhub:hydrologic_handoff"] == "not_evaluated"
+    assert saved_item.properties["stormhub:ras_execution"] == "not_evaluated"
+    assert saved_item.properties["stormhub:hydraulic_qaqc"] == "not_evaluated"
+    assert saved_item.properties["stormhub:publication"] == "prohibited"
+    assert saved_item.properties["stormhub:forecast_eligible"] is False
     assert any(link.rel == pystac.RelType.DERIVED_FROM for link in saved_item.links)
     assert any(link.rel == "related" for link in saved_item.links)
     assert "https://stac-extensions.github.io/file/" in " ".join(saved_item.stac_extensions)
@@ -284,8 +431,68 @@ def test_publish_successful_run_creates_portable_catalog_tree(tmp_path: Path) ->
     manifest_checksum = saved_item.assets["scenario-run"].extra_fields["file:checksum"]
     assert sha256_from_checksum(manifest_checksum) == sha256_file(manifest_path)
     reloaded = pystac.Catalog.from_file(str(tmp_path / "catalog" / "catalog.json"))
-    assert reloaded.get_child("flood-scenario-runs").get_item(run.run_id) is not None
+    collection = reloaded.get_child("flood-scenario-runs")
+    assert collection.get_item(run.run_id) is not None
+    assert set(SCENARIO_RESPONSE_ITEM_ASSETS).issubset(collection.extra_fields["item_assets"])
+    assert precipitation_path.read_bytes() == source_item_bytes
     assert item.id == run.run_id
+
+
+def test_publish_all_minimum_products_with_searchable_qualification(tmp_path: Path) -> None:
+    """Preserve complete product metadata and conditional policy through reload."""
+    catalog, watershed, precipitation_path = make_catalog_and_watershed(tmp_path)
+    source_item_bytes = precipitation_path.read_bytes()
+    run, manifest_path = make_minimum_product_run(tmp_path, watershed, precipitation_path)
+
+    publish_scenario_run(catalog, run, manifest_path, watershed)
+
+    item_path = (
+        tmp_path
+        / "catalog"
+        / "flood-scenario-runs"
+        / run.run_id
+        / f"{run.run_id}.json"
+    )
+    saved = pystac.Item.from_file(str(item_path))
+    minimum_products = {
+        "scenario-products",
+        "qualification",
+        "hms-output-dss",
+        "hms-pathname-catalog",
+        "hms-hydrographs",
+        "ras-result-hdf",
+        "ras-hydrographs",
+        "maximum-wse",
+        "maximum-depth",
+        "maximum-velocity",
+        "preview",
+    }
+    assert minimum_products.issubset(saved.assets)
+    assert saved.properties["stormhub:hms_execution"] == "pass"
+    assert saved.properties["stormhub:hydrologic_handoff"] == "conditional"
+    assert saved.properties["stormhub:ras_execution"] == "pass"
+    assert saved.properties["stormhub:hydraulic_qaqc"] == "conditional"
+    assert saved.properties["stormhub:publication"] == "prohibited"
+    assert saved.properties["stormhub:forecast_eligible"] is False
+
+    wse = saved.assets["maximum-wse"]
+    assert wse.media_type == "image/tiff; application=geotiff; profile=cloud-optimized"
+    assert wse.roles == ["data", "visual", "maximum-wse"]
+    assert wse.extra_fields["proj:code"] == "EPSG:5070"
+    assert wse.extra_fields["proj:shape"] == [2, 2]
+    assert wse.extra_fields["raster:bands"][0]["unit"] == "ft"
+    assert wse.extra_fields["file:size"] > 0
+    assert sha256_from_checksum(wse.extra_fields["file:checksum"]) == sha256_file(
+        tmp_path / "outputs" / run.run_id / "maximum-wse.tif"
+    )
+    assert saved.assets["hms-hydrographs"].extra_fields["table:row_count"] == 2
+    extension_text = " ".join(saved.stac_extensions)
+    assert "https://stac-extensions.github.io/file/" in extension_text
+    assert "https://stac-extensions.github.io/projection/v2.0.0/schema.json" in saved.stac_extensions
+    assert "https://stac-extensions.github.io/raster/" in extension_text
+    assert "https://stac-extensions.github.io/table/v1.2.0/schema.json" in saved.stac_extensions
+    assert "datacube" not in extension_text
+    assert precipitation_path.read_bytes() == source_item_bytes
 
 
 def test_publish_failed_run_preserves_failure_provenance(tmp_path: Path) -> None:
@@ -307,6 +514,38 @@ def test_publish_failed_run_preserves_failure_provenance(tmp_path: Path) -> None
         "retryable": True,
     }
     assert "wse" not in item.assets
+
+
+def test_publisher_preserves_remote_asset_hrefs(tmp_path: Path) -> None:
+    """Keep remote IRIs absolute while local assets remain catalog-relative."""
+    catalog, watershed, precipitation_path = make_catalog_and_watershed(tmp_path)
+    run, manifest_path, _ = make_terminal_run(
+        tmp_path,
+        watershed,
+        precipitation_path,
+        run_id="scenario-remote",
+    )
+    remote = FileReference(
+        asset_key="remote-report",
+        href="https://example.com/flood/scenario-remote/report.json",
+        media_type=pystac.MediaType.JSON,
+        roles=["metadata"],
+        sha256="d" * 64,
+        size_bytes=1234,
+    )
+    payload = run.model_dump()
+    payload["outputs"].append(remote.model_dump())
+    payload["stages"][1]["output_asset_keys"].append("remote-report")
+    run_with_remote = ScenarioRun.model_validate(payload)
+
+    item = publish_scenario_run(catalog, run_with_remote, manifest_path, watershed)
+
+    assert item.assets["remote-report"].href == remote.href
+    assert item.assets["remote-report"].extra_fields["file:size"] == 1234
+    assert sha256_from_checksum(
+        item.assets["remote-report"].extra_fields["file:checksum"]
+    ) == remote.sha256
+    assert item.assets["wse"].href.startswith("../../../outputs/")
 
 
 def test_publisher_rejects_duplicates_and_changed_outputs(tmp_path: Path) -> None:

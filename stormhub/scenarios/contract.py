@@ -12,7 +12,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
-CONTRACT_VERSION = "2.0.0"
+CONTRACT_VERSION = "2.1.0"
+COMPATIBLE_CONTRACT_VERSIONS = ("2.0.0", CONTRACT_VERSION)
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Identifier = Annotated[
@@ -46,6 +47,26 @@ class QualityStatus(str, Enum):
     PASSED = "passed"
     WARNING = "warning"
     FAILED = "failed"
+
+
+class QualificationStatus(str, Enum):
+    """Decision state for one integrated qualification gate."""
+
+    NOT_EVALUATED = "not_evaluated"
+    PASS = "pass"
+    CONDITIONAL = "conditional"
+    FAIL = "fail"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class PublicationDisposition(str, Enum):
+    """Approved use of a cataloged scenario response."""
+
+    PROHIBITED = "prohibited"
+    INTERNAL = "internal"
+    CANDIDATE = "candidate"
+    ELIGIBLE = "eligible"
+    RETIRED = "retired"
 
 
 class WorkflowKind(str, Enum):
@@ -112,6 +133,38 @@ class FileReference(ContractModel):
         """Reject duplicate roles because they usually indicate producer bugs."""
         if len(value) != len(set(value)):
             raise ValueError("roles must be unique")
+        return value
+
+    @field_validator("metadata")
+    @classmethod
+    def table_metadata_is_complete(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Validate Table extension fields before publication declares it."""
+        table_keys = {key for key in value if key.startswith("table:")}
+        if not table_keys:
+            return value
+
+        required = {"table:columns", "table:row_count"}
+        missing = required - set(value)
+        if missing:
+            raise ValueError(f"table metadata is missing required fields: {sorted(missing)}")
+
+        row_count = value["table:row_count"]
+        if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+            raise ValueError("table:row_count must be a non-negative integer")
+
+        columns = value["table:columns"]
+        if not isinstance(columns, list) or not columns:
+            raise ValueError("table:columns must be a non-empty list")
+        names: list[str] = []
+        for column in columns:
+            if not isinstance(column, dict):
+                raise ValueError("each table:columns entry must be an object")
+            name = column.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("each table:columns entry must contain a non-empty name")
+            names.append(name)
+        if len(names) != len(set(names)):
+            raise ValueError("table:columns names must be unique")
         return value
 
 
@@ -300,6 +353,39 @@ class QualitySummary(ContractModel):
     checks: list[QualityCheck] = Field(default_factory=list)
 
 
+class QualificationGate(ContractModel):
+    """One independently reviewable integrated qualification decision."""
+
+    status: QualificationStatus = QualificationStatus.NOT_EVALUATED
+    evidence_asset_keys: list[Identifier] = Field(default_factory=list)
+    message: NonEmptyString | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("evidence_asset_keys")
+    @classmethod
+    def evidence_asset_keys_are_unique(cls, value: list[str]) -> list[str]:
+        """Reject ambiguous duplicate evidence references."""
+        if len(value) != len(set(value)):
+            raise ValueError("qualification evidence asset keys must be unique")
+        return value
+
+
+class QualificationSummary(ContractModel):
+    """Four gates that separate execution completion from model qualification."""
+
+    hms_execution: QualificationGate = Field(default_factory=QualificationGate)
+    hydrologic_handoff: QualificationGate = Field(default_factory=QualificationGate)
+    ras_execution: QualificationGate = Field(default_factory=QualificationGate)
+    hydraulic_qaqc: QualificationGate = Field(default_factory=QualificationGate)
+
+    def required_gates(self, workflow: WorkflowKind) -> tuple[QualificationGate, ...]:
+        """Return gates that must pass before this workflow can be promoted."""
+        hydraulic = (self.ras_execution, self.hydraulic_qaqc)
+        if workflow == WorkflowKind.HYDROLOGIC_HYDRAULIC:
+            return (self.hms_execution, self.hydrologic_handoff, *hydraulic)
+        return hydraulic
+
+
 class FailureDetails(ContractModel):
     """Machine-readable failure information for retry decisions."""
 
@@ -354,7 +440,7 @@ class StageRun(ContractModel):
 class ScenarioRun(ContractModel):
     """Versioned manifest for one planned or completed scenario run."""
 
-    contract_version: Literal[CONTRACT_VERSION] = CONTRACT_VERSION
+    contract_version: Literal["2.0.0", "2.1.0"] = CONTRACT_VERSION
     run_id: Identifier
     specification_sha256: Sha256
     spec: ScenarioRunSpec
@@ -365,6 +451,8 @@ class ScenarioRun(ContractModel):
     stages: list[StageRun] = Field(default_factory=list)
     outputs: list[FileReference] = Field(default_factory=list)
     quality: QualitySummary = Field(default_factory=QualitySummary)
+    qualification: QualificationSummary = Field(default_factory=QualificationSummary)
+    publication: PublicationDisposition = PublicationDisposition.PROHIBITED
     failure: FailureDetails | None = None
     labels: dict[str, str] = Field(default_factory=dict)
 
@@ -389,6 +477,16 @@ class ScenarioRun(ContractModel):
             raise ValueError("asset key 'scenario-run' is reserved for the contract manifest")
         if len(asset_keys) != len(set(asset_keys)):
             raise ValueError("DSS, model package, and output asset keys must be unique")
+        published_asset_keys = {
+            "scenario-run",
+            "target-precipitation-dss",
+            self.spec.hydraulic.model.package.asset_key,
+            *(output.asset_key for output in self.outputs),
+        }
+        if self.spec.hydrologic is not None:
+            published_asset_keys.add(self.spec.hydrologic.model.package.asset_key)
+        if len(published_asset_keys) != 3 + len(self.outputs) + int(self.spec.hydrologic is not None):
+            raise ValueError("scenario publication asset keys must be unique")
 
         stage_names = [stage.stage for stage in self.stages]
         if len(stage_names) != len(set(stage_names)):
@@ -399,6 +497,20 @@ class ScenarioRun(ContractModel):
             if unknown:
                 raise ValueError(
                     f"stage '{stage.stage.value}' references unknown output assets: {sorted(unknown)}"
+                )
+        evidence_asset_keys = {
+            "scenario-run",
+            "target-precipitation-dss",
+            self.spec.hydraulic.model.package.asset_key,
+            *(output.asset_key for output in self.outputs),
+        }
+        if self.spec.hydrologic is not None:
+            evidence_asset_keys.add(self.spec.hydrologic.model.package.asset_key)
+        for gate_name, gate in self.qualification:
+            unknown = set(gate.evidence_asset_keys) - evidence_asset_keys
+            if unknown:
+                raise ValueError(
+                    f"qualification gate '{gate_name}' references unknown evidence assets: {sorted(unknown)}"
                 )
 
         terminal = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}
@@ -442,6 +554,29 @@ class ScenarioRun(ContractModel):
             raise ValueError("a failed run must contain failure details")
         elif self.status not in {RunStatus.FAILED, RunStatus.CANCELLED} and self.failure is not None:
             raise ValueError("failure details are only valid for failed or cancelled runs")
+
+        if self.status in {RunStatus.FAILED, RunStatus.CANCELLED}:
+            if self.publication != PublicationDisposition.PROHIBITED:
+                raise ValueError("failed or cancelled runs must have prohibited publication")
+
+        promotion_states = {
+            PublicationDisposition.CANDIDATE,
+            PublicationDisposition.ELIGIBLE,
+        }
+        if self.publication in promotion_states:
+            if self.status != RunStatus.SUCCEEDED:
+                raise ValueError(
+                    f"publication disposition '{self.publication.value}' requires a succeeded run"
+                )
+            incomplete = [
+                gate.status.value
+                for gate in self.qualification.required_gates(self.spec.workflow)
+                if gate.status != QualificationStatus.PASS
+            ]
+            if incomplete:
+                raise ValueError(
+                    f"publication disposition '{self.publication.value}' requires all qualification gates to pass"
+                )
         return self
 
 
