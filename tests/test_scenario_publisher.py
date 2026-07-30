@@ -26,11 +26,13 @@ from stormhub.scenarios import (
     RunStatus,
     ScenarioRun,
     ScenarioRunSpec,
+    ScenarioResponseIdentity,
     SoftwareProvenance,
     StageName,
     StageRun,
     StacAssetReference,
     WatershedReference,
+    VersionedIdentity,
     WorkflowKind,
     SCENARIO_RESPONSE_ITEM_ASSETS,
     TARGET_PRECIPITATION_ASSET_KEY,
@@ -39,6 +41,10 @@ from stormhub.scenarios import (
     geometry_sha256,
     load_scenario_run,
     new_scenario_run,
+    new_scenario_assessment,
+    new_scenario_promotion,
+    publish_scenario_assessment,
+    publish_scenario_promotion,
     publish_scenario_run,
 )
 from stormhub.utils import sha256_file, sha256_from_checksum
@@ -95,6 +101,7 @@ def make_terminal_run(
     *,
     run_id: str = "scenario-001",
     status: RunStatus = RunStatus.SUCCEEDED,
+    response_aware: bool = False,
 ) -> tuple[ScenarioRun, Path, Path]:
     """Build a terminal run and its checksum-pinned local artifacts."""
     manifest_path = root / "work" / run_id / "scenario-run.json"
@@ -211,6 +218,26 @@ def make_terminal_run(
                     interval_minutes=15,
                 )
             ],
+        ),
+        response=(
+            ScenarioResponseIdentity(
+                source_scenario_id="1",
+                basin_id="deloutre",
+                response_geometry_policy="valid-hydraulic-result-footprint",
+                model_profile=VersionedIdentity(
+                    id="deloutre-profile",
+                    version="1.0.0",
+                    sha256="a" * 64,
+                ),
+                qualification_policy=VersionedIdentity(
+                    id="development-v0",
+                    version="0.1.0",
+                    sha256="b" * 64,
+                ),
+                dependency_resolution_sha256="c" * 64,
+            )
+            if response_aware
+            else None
         ),
     )
     planned = new_scenario_run(spec, run_id=run_id, created_at=START)
@@ -594,3 +621,83 @@ def test_publisher_rejects_nonterminal_run_without_writing_manifest(tmp_path: Pa
         publish_scenario_run(catalog, planned, manifest_path, watershed)
 
     assert not manifest_path.exists()
+
+
+def test_assessment_and_promotion_publish_without_mutating_run_item(tmp_path: Path) -> None:
+    """Fan decision history into separate Collections while preserving the run."""
+    catalog, watershed, precipitation_path = make_catalog_and_watershed(tmp_path)
+    run, manifest_path, _ = make_terminal_run(
+        tmp_path,
+        watershed,
+        precipitation_path,
+        response_aware=True,
+    )
+    run_item = publish_scenario_run(catalog, run, manifest_path, watershed)
+    run_item_path = Path(run_item.get_self_href())
+    original_run_item = run_item_path.read_bytes()
+
+    decision_root = tmp_path / "work" / "decisions"
+    assessment_payload_path = decision_root / "qualification-assessment.json"
+    assessment_payload_path.parent.mkdir(parents=True, exist_ok=True)
+    assessment_payload_path.write_text('{"status":"pass"}\n', encoding="utf-8")
+    assessment_record_path = decision_root / "scenario-assessment.json"
+    assessment_reference = file_reference_from_path(
+        assessment_payload_path,
+        assessment_record_path,
+        asset_key="qualification-assessment",
+        media_type="application/json",
+        roles=["metadata", "quality"],
+    )
+    assessment = new_scenario_assessment(
+        run_id=run.run_id,
+        specification_sha256=run.specification_sha256,
+        response=run.spec.response,
+        assessment=assessment_reference,
+        status=QualificationStatus.PASS,
+        recommended_publication=PublicationDisposition.CANDIDATE,
+        created_at=START + timedelta(hours=1),
+    )
+    assessment_item = publish_scenario_assessment(
+        catalog,
+        run,
+        run_item,
+        assessment,
+        assessment_record_path,
+    )
+
+    promotion_record_path = decision_root / "scenario-promotion.json"
+    promotion = new_scenario_promotion(
+        assessment=assessment,
+        disposition=PublicationDisposition.ELIGIBLE,
+        authority="forecast program manager",
+        rationale="The passing assessment and independent review were accepted.",
+        decided_at=START + timedelta(hours=2),
+    )
+    promotion_item = publish_scenario_promotion(
+        catalog,
+        run,
+        run_item,
+        assessment,
+        assessment_item,
+        promotion,
+        promotion_record_path,
+    )
+
+    assert run_item_path.read_bytes() == original_run_item
+    assert run_item.properties["stormhub:publication"] == "prohibited"
+    assert assessment_item.properties["stormhub:recommended_publication"] == "candidate"
+    assert assessment_item.properties["stormhub:forecast_eligible"] is False
+    assert promotion_item.properties["stormhub:publication"] == "eligible"
+    assert promotion_item.properties["stormhub:forecast_eligible"] is True
+    assert any(link.rel == pystac.RelType.DERIVED_FROM for link in assessment_item.links)
+    assert any(link.rel == pystac.RelType.DERIVED_FROM for link in promotion_item.links)
+    assert not Path(assessment_item.assets["scenario-assessment"].href).is_absolute()
+    assert not Path(promotion_item.assets["scenario-promotion"].href).is_absolute()
+
+    reloaded = pystac.Catalog.from_file(str(tmp_path / "catalog" / "catalog.json"))
+    assessment_collection = reloaded.get_child("flood-scenario-assessments")
+    promotion_collection = reloaded.get_child("flood-scenario-promotions")
+    assert assessment_collection.get_item(assessment.assessment_id) is not None
+    assert promotion_collection.get_item(promotion.promotion_id) is not None
+    assert "scenario-run" not in assessment_collection.extra_fields["item_assets"]
+    assert "scenario-run" not in promotion_collection.extra_fields["item_assets"]

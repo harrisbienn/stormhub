@@ -12,8 +12,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
-CONTRACT_VERSION = "2.1.0"
-COMPATIBLE_CONTRACT_VERSIONS = ("2.0.0", CONTRACT_VERSION)
+CONTRACT_VERSION = "2.2.0"
+COMPATIBLE_CONTRACT_VERSIONS = ("2.0.0", "2.1.0", CONTRACT_VERSION)
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Identifier = Annotated[
@@ -178,6 +178,26 @@ class WatershedReference(ContractModel):
     _portable_item_href = field_validator("item_href")(_validate_href)
 
 
+class VersionedIdentity(ContractModel):
+    """Content-addressed identity for a versioned profile, policy, or certificate."""
+
+    id: Identifier
+    version: NonEmptyString
+    sha256: Sha256
+
+
+class ScenarioResponseIdentity(ContractModel):
+    """Basin/model response identity shared by execution and later decisions."""
+
+    source_scenario_id: Identifier
+    basin_id: Identifier
+    response_geometry_policy: NonEmptyString
+    model_profile: VersionedIdentity
+    qualification_policy: VersionedIdentity
+    compatibility_certificate: VersionedIdentity | None = None
+    dependency_resolution_sha256: Sha256 | None = None
+
+
 class PrecipitationInput(ContractModel):
     """Source and watershed-transposed precipitation for the run."""
 
@@ -318,6 +338,10 @@ class ScenarioRunSpec(ContractModel):
     hydrologic: HydrologicStageSpec | None = None
     hydraulic: HydraulicStageSpec
     antecedent_conditions: AntecedentConditions | None = None
+    response: ScenarioResponseIdentity | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def stages_match_workflow(self) -> ScenarioRunSpec:
@@ -440,7 +464,7 @@ class StageRun(ContractModel):
 class ScenarioRun(ContractModel):
     """Versioned manifest for one planned or completed scenario run."""
 
-    contract_version: Literal["2.0.0", "2.1.0"] = CONTRACT_VERSION
+    contract_version: Literal["2.0.0", "2.1.0", "2.2.0"] = CONTRACT_VERSION
     run_id: Identifier
     specification_sha256: Sha256
     spec: ScenarioRunSpec
@@ -558,6 +582,11 @@ class ScenarioRun(ContractModel):
         if self.status in {RunStatus.FAILED, RunStatus.CANCELLED}:
             if self.publication != PublicationDisposition.PROHIBITED:
                 raise ValueError("failed or cancelled runs must have prohibited publication")
+
+        if self.spec.response is not None and self.publication != PublicationDisposition.PROHIBITED:
+            raise ValueError(
+                "response-aware runs keep publication prohibited; use an append-only promotion record"
+            )
 
         promotion_states = {
             PublicationDisposition.CANDIDATE,

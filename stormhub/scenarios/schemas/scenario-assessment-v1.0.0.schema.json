@@ -1,0 +1,244 @@
+{
+  "$defs": {
+    "FileReference": {
+      "additionalProperties": false,
+      "description": "Content-addressed reference to a run input or output file.",
+      "properties": {
+        "asset_key": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Asset Key",
+          "type": "string"
+        },
+        "href": {
+          "minLength": 1,
+          "title": "Href",
+          "type": "string"
+        },
+        "kind": {
+          "const": "file",
+          "default": "file",
+          "title": "Kind",
+          "type": "string"
+        },
+        "media_type": {
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "roles": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Roles",
+          "type": "array"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        }
+      },
+      "required": [
+        "asset_key",
+        "href",
+        "media_type",
+        "roles",
+        "sha256",
+        "size_bytes"
+      ],
+      "title": "FileReference",
+      "type": "object"
+    },
+    "PublicationDisposition": {
+      "description": "Approved use of a cataloged scenario response.",
+      "enum": [
+        "prohibited",
+        "internal",
+        "candidate",
+        "eligible",
+        "retired"
+      ],
+      "title": "PublicationDisposition",
+      "type": "string"
+    },
+    "QualificationStatus": {
+      "description": "Decision state for one integrated qualification gate.",
+      "enum": [
+        "not_evaluated",
+        "pass",
+        "conditional",
+        "fail",
+        "not_applicable"
+      ],
+      "title": "QualificationStatus",
+      "type": "string"
+    },
+    "ScenarioResponseIdentity": {
+      "additionalProperties": false,
+      "description": "Basin/model response identity shared by execution and later decisions.",
+      "properties": {
+        "basin_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Basin Id",
+          "type": "string"
+        },
+        "compatibility_certificate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VersionedIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dependency_resolution_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dependency Resolution Sha256"
+        },
+        "model_profile": {
+          "$ref": "#/$defs/VersionedIdentity"
+        },
+        "qualification_policy": {
+          "$ref": "#/$defs/VersionedIdentity"
+        },
+        "response_geometry_policy": {
+          "minLength": 1,
+          "title": "Response Geometry Policy",
+          "type": "string"
+        },
+        "source_scenario_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Source Scenario Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_scenario_id",
+        "basin_id",
+        "response_geometry_policy",
+        "model_profile",
+        "qualification_policy"
+      ],
+      "title": "ScenarioResponseIdentity",
+      "type": "object"
+    },
+    "VersionedIdentity": {
+      "additionalProperties": false,
+      "description": "Content-addressed identity for a versioned profile, policy, or certificate.",
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "sha256"
+      ],
+      "title": "VersionedIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Policy-pinned qualification of one immutable scenario response run.",
+  "properties": {
+    "assessment": {
+      "$ref": "#/$defs/FileReference"
+    },
+    "assessment_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "title": "Assessment Id",
+      "type": "string"
+    },
+    "contract_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "recommended_publication": {
+      "$ref": "#/$defs/PublicationDisposition",
+      "default": "prohibited"
+    },
+    "response": {
+      "$ref": "#/$defs/ScenarioResponseIdentity"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "specification_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Specification Sha256",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/QualificationStatus"
+    }
+  },
+  "required": [
+    "assessment_id",
+    "run_id",
+    "specification_sha256",
+    "response",
+    "assessment",
+    "status",
+    "created_at"
+  ],
+  "title": "ScenarioAssessment",
+  "type": "object"
+}

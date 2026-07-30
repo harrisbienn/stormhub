@@ -19,6 +19,7 @@ from stormhub.scenarios.contract import (
     HydrologicStageSpec,
     PrecipitationInput,
     ScenarioRunSpec,
+    ScenarioResponseIdentity,
     StacAssetReference,
     WatershedReference,
     WorkflowKind,
@@ -146,6 +147,7 @@ def scenario_run_spec_from_stac(
     source_asset_key: str = "AORC",
     target_dss_asset_key: str = "dss-target",
     antecedent_conditions: AntecedentConditions | None = None,
+    response: ScenarioResponseIdentity | None = None,
     require_dss_validation: bool = True,
     verify_local_checksums: bool = True,
 ) -> ScenarioRunSpec:
@@ -164,6 +166,11 @@ def scenario_run_spec_from_stac(
     if target_watershed_id != watershed_item.id:
         raise ValueError(
             f"Target DSS watershed '{target_watershed_id}' does not match requested watershed '{watershed_item.id}'"
+        )
+    if response is not None and response.source_scenario_id != storm_item.id:
+        raise ValueError(
+            f"Response source scenario '{response.source_scenario_id}' "
+            f"does not match Storm Item '{storm_item.id}'"
         )
     validation_status = target_asset.extra_fields.get("stormhub:validation_status", "not_run")
     if require_dss_validation and validation_status != "passed":
@@ -215,4 +222,5 @@ def scenario_run_spec_from_stac(
         hydrologic=hydrologic,
         hydraulic=hydraulic,
         antecedent_conditions=antecedent_conditions,
+        response=response,
     )
