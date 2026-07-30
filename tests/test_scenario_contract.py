@@ -1,6 +1,7 @@
 """Tests for the versioned hydrologic-hydraulic scenario run contract."""
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 from importlib.resources import files
 import json
 from pathlib import Path
@@ -28,11 +29,13 @@ from stormhub.scenarios import (
     RunStatus,
     ScenarioRun,
     ScenarioRunSpec,
+    ScenarioResponseIdentity,
     SoftwareProvenance,
     StageName,
     StageRun,
     StacAssetReference,
     WatershedReference,
+    VersionedIdentity,
     WorkflowKind,
     load_scenario_run,
     new_scenario_run,
@@ -135,6 +138,25 @@ def make_spec(parameters: dict | None = None) -> ScenarioRunSpec:
                     interval_minutes=15,
                 )
             ],
+        ),
+    )
+
+
+def make_response() -> ScenarioResponseIdentity:
+    """Create a content-addressed basin/model response identity."""
+    return ScenarioResponseIdentity(
+        source_scenario_id="1",
+        basin_id="lwi-r3-huc12-domain",
+        response_geometry_policy="valid-hydraulic-result-footprint",
+        model_profile=VersionedIdentity(
+            id="deloutre-profile",
+            version="1.0.0",
+            sha256="d" * 64,
+        ),
+        qualification_policy=VersionedIdentity(
+            id="development-v0",
+            version="0.1.0",
+            sha256="e" * 64,
         ),
     )
 
@@ -311,7 +333,7 @@ def test_schema_exposes_version_and_required_run_fields() -> None:
 
 def test_packaged_schema_matches_python_model() -> None:
     """Fail when a model change is committed without regenerating its schema."""
-    schema_path = files("stormhub.scenarios").joinpath("schemas/scenario-run-v2.1.0.schema.json")
+    schema_path = files("stormhub.scenarios").joinpath("schemas/scenario-run-v2.2.0.schema.json")
     packaged_schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
     assert packaged_schema == scenario_run_schema()
@@ -390,6 +412,46 @@ def test_forecast_promotion_requires_succeeded_run_and_all_gates_pass() -> None:
     promoted = ScenarioRun.model_validate(payload)
 
     assert promoted.publication == PublicationDisposition.ELIGIBLE
+
+
+def test_response_identity_changes_run_identity_and_requires_external_promotion() -> None:
+    """Pin profile and policy inputs while keeping the execution record immutable."""
+    plain = make_spec()
+    response_aware = ScenarioRunSpec.model_validate(
+        {**plain.model_dump(), "response": make_response().model_dump()}
+    )
+    run = new_scenario_run(response_aware, created_at=UTC_START)
+
+    assert response_aware.sha256() != plain.sha256()
+    payload = make_succeeded_run().model_dump()
+    payload["spec"] = response_aware.model_dump()
+    payload["specification_sha256"] = response_aware.sha256()
+    payload["publication"] = PublicationDisposition.CANDIDATE
+
+    with pytest.raises(ValidationError, match="append-only promotion record"):
+        ScenarioRun.model_validate(payload)
+
+
+def test_contract_reads_v21_manifest_without_response_identity() -> None:
+    """Preserve historical 2.1 execution records without inventing profile identity."""
+    payload = new_scenario_run(make_spec(), created_at=UTC_START).model_dump(mode="json")
+    payload["contract_version"] = "2.1.0"
+
+    restored = ScenarioRun.model_validate(payload)
+
+    assert restored.contract_version == "2.1.0"
+    assert restored.spec.response is None
+    assert "response" not in restored.spec.model_dump(mode="json")
+
+
+def test_optional_response_field_preserves_legacy_specification_digest() -> None:
+    """Do not add a serialized null that changes historical 2.1 run identity."""
+    spec = make_spec()
+    payload = spec.model_dump(mode="json")
+
+    assert "response" not in payload
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    assert spec.sha256() == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def test_table_metadata_requires_complete_unique_column_contract() -> None:
