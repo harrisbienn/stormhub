@@ -19,7 +19,7 @@ The contract complements STAC rather than replacing it:
 Contract guarantees
 -------------------
 
-Version 2.1.0 provides the following guarantees:
+Version 2.2.0 provides the following guarantees:
 
 * Unknown fields are rejected so misspellings do not silently lose metadata.
 * All timestamps are timezone-aware UTC values.
@@ -44,6 +44,11 @@ Version 2.1.0 provides the following guarantees:
   ``prohibited``.
 * ``candidate`` and ``eligible`` publication requires a successful run and a
   ``pass`` result for every workflow-required qualification gate.
+* Response-aware runs pin source scenario, basin, model-profile,
+  qualification-policy, compatibility-certificate, and dependency-resolution
+  identities in the immutable specification.
+* Response-aware runs remain ``prohibited`` in their execution record. Later
+  assessments and publication decisions are append-only records and STAC Items.
 
 The ``specification_sha256`` value is an idempotency key. An orchestrator can
 detect that an identical specification has already been submitted and avoid an
@@ -165,6 +170,32 @@ The publisher exposes the four gate states, disposition, and a derived
 failed, cancelled, conditional, or unevaluated run cannot be promoted merely
 because its files exist.
 
+Response assessment and promotion
+---------------------------------
+
+Version 2.2.0 formalizes the separation between immutable execution facts and
+decisions that can change after a run completes:
+
+* ``ScenarioAssessment`` binds one policy-owned qualification assessment to
+  the exact run specification and response identity.
+* ``ScenarioPromotion`` records an operator authority, rationale, disposition,
+  and optional predecessor decision.
+* Both records derive their IDs from canonical content, authenticate themselves
+  on load, and use append-only writers. An identical retry is accepted; a
+  different record cannot replace an existing path.
+* An assessment may recommend ``candidate`` only when it passes, but it cannot
+  grant ``eligible``. Candidate or eligible promotion requires a passing
+  assessment.
+
+``publish_scenario_assessment`` and ``publish_scenario_promotion`` create
+separate ``flood-scenario-assessments`` and ``flood-scenario-promotions``
+Collections. They copy the run's spatial and temporal extent, expose the
+response identity as searchable properties, and link back through
+``derived_from`` and ``related`` links. They never edit the historical run
+Item. A later retirement or replacement decision therefore creates another
+promotion Item and may identify its predecessor; it does not erase the
+decision history.
+
 Publication verifies local checksums and sizes by default. A duplicate run ID
 is rejected. ``overwrite=True`` permits an idempotent republication only when
 the existing Item has the same specification digest; it cannot replace an
@@ -215,9 +246,13 @@ Schema and compatibility
 ------------------------
 
 The current packaged JSON Schema is
-``stormhub/scenarios/schemas/scenario-run-v2.1.0.schema.json``. Historical
+``stormhub/scenarios/schemas/scenario-run-v2.2.0.schema.json``. The companion
+decision schemas are
+``scenario-assessment-v1.0.0.schema.json`` and
+``scenario-promotion-v1.0.0.schema.json``. Historical
 ``scenario-run-v1.0.0.schema.json`` and
-``scenario-run-v2.0.0.schema.json`` files remain packaged for readers of
+``scenario-run-v2.0.0.schema.json`` and
+``scenario-run-v2.1.0.schema.json`` files remain packaged for readers of
 previously published manifests. Non-Python
 workers can validate manifests against this file. Python producers should use
 the Pydantic models, which are also the source used to generate the schema.
@@ -228,10 +263,15 @@ required is a major change. Readers should select a model by
 ``contract_version`` rather than assuming the newest model can parse every
 historical manifest.
 
+Version 2.2.0 is additive over 2.1.0. It adds an optional result-defining
+``response`` identity. A response-aware run must use append-only assessment
+and promotion records, while a historical 2.1.0 manifest remains readable
+without a synthetic response identity.
+
 Version 2.1.0 is additive over 2.0.0. The Python reader accepts a 2.0.0
 manifest and supplies conservative qualification defaults: every gate is
 ``not_evaluated`` and publication is ``prohibited``. New manifests emit
-2.1.0.
+2.2.0.
 
 Version 2.0.0 was a deliberate breaking change from the single hydraulic-stage
 1.0.0 model. ``ScenarioRunSpec`` now groups model and execution provenance into
