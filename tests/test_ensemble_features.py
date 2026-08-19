@@ -18,6 +18,7 @@ import xarray as xr
 from stormhub.met.ensemble_features import (
     FEATURE_TABLE_SCHEMA,
     _geodesic_zone_areas,
+    _verify_precipitation_cube,
     _weighted_coefficient_of_variation,
     compute_precipitation_features,
     export_ensemble_feature_table,
@@ -99,6 +100,31 @@ def test_compute_precipitation_features_excludes_zero_coverage_zone() -> None:
     features = compute_precipitation_features(make_precipitation(), zones=zones)
 
     assert features["spatial_accumulation_cv"] == pytest.approx(0.11111111)
+
+
+def test_precipitation_grid_verification_bounds_projection_repeatability() -> None:
+    """Allow sub-metre projection drift but reject a material grid shift."""
+    item = pystac.Item(
+        id="test-item",
+        geometry={"type": "Point", "coordinates": [0.0, 0.0]},
+        bbox=[0.0, 0.0, 0.0, 0.0],
+        datetime=None,
+        start_datetime=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        end_datetime=datetime(2020, 1, 1, 4, tzinfo=timezone.utc),
+        properties={},
+    )
+    grid = {
+        "crs": "EPSG:5070",
+        "shape": [2, 2],
+        "bbox": [0.4, 0.4, 2000.4, 2000.4],
+        "resolution_m": 1000,
+    }
+
+    _verify_precipitation_cube(item, make_precipitation(), grid, 4)
+    grid["bbox"] = [0.6, 0.6, 2000.6, 2000.6]
+
+    with pytest.raises(ValueError, match="derived grid bounds"):
+        _verify_precipitation_cube(item, make_precipitation(), grid, 4)
 
 
 def test_weighted_coefficient_of_variation_rejects_invalid_weights() -> None:

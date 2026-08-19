@@ -693,7 +693,11 @@ def _verify_precipitation_cube(
         raise ValueError(f"Storm item '{item.id}' derived grid shape does not match target DSS metadata.")
     if crs is None or not CRS.from_user_input(crs).equals(CRS.from_user_input(grid["crs"])):
         raise ValueError(f"Storm item '{item.id}' derived grid CRS does not match target DSS metadata.")
-    if not np.allclose(bounds, grid["bbox"], rtol=0, atol=1e-6):
+    # GDAL/PROJ patch revisions can shift a repeated geographic-to-SHG
+    # projection by a sub-metre amount without changing cell membership.
+    # Bound that repeatability allowance to 0.1% of a cell and at most 0.5 m.
+    bounds_tolerance_m = min(float(grid["resolution_m"]) * 1e-3, 0.5)
+    if not np.allclose(bounds, grid["bbox"], rtol=0, atol=bounds_tolerance_m):
         raise ValueError(f"Storm item '{item.id}' derived grid bounds do not match target DSS metadata.")
     if not np.allclose(resolution, [grid["resolution_m"], grid["resolution_m"]], rtol=0, atol=1e-6):
         raise ValueError(f"Storm item '{item.id}' derived grid resolution does not match target DSS metadata.")
