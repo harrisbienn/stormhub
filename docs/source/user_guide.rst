@@ -149,6 +149,51 @@ Start with one ``item_ids`` value as a smoke test before processing a full
 collection. A target product should only be treated as model-ready when its
 spatial and DSS record-count validations both report ``passed``.
 
+Authenticated ensemble-feature export
+-------------------------------------
+
+StormHub owns precipitation-feature derivation for downstream ensemble
+selection. The installed ``stormhub-export-ensemble-features`` command reads
+one explicit events collection, verifies that its ``dss_manifest`` asset is
+the supplied manifest, and requires exactly one passed target-DSS row for
+every collection Item. It then re-derives each translated hourly AORC grid and
+writes schema ``floodforecast/ensemble-feature-table/1.0``.
+
+For a DeLoutre export, run the command from the repository root with the
+tracked catalog paths and an output outside Git-managed source files:
+
+.. code-block:: powershell
+
+   stormhub-export-ensemble-features `
+      catalogs\lwi-region3\catalog.json `
+      --collection-id 24hr-events `
+      --manifest catalogs\lwi-region3\24hr-events\dss\dss-manifest.csv `
+      --study-id deloutre `
+      --zones <portable-path-to-reviewed-deloutre-subbasins> `
+      --output data\outputs\deloutre-24hr-ensemble-features.json
+
+The optional ``--zones`` dataset must be a single-file GeoJSON or GeoPackage
+with nonempty vector geometries and a declared CRS. With zones, the spatial
+coefficient of variation uses zone-average event totals; without zones, it
+uses finite target-grid cells.
+The DeLoutre engineering review should supply the reviewed subbasin geometry
+so the spatial-distribution feature represents the intended hydrologic units.
+
+The export includes accumulation, hourly intensity, precipitation centroid,
+maximum-precipitation location, spatial coefficient of variation, peak timing,
+cumulative-depth fractions, and signed/distance transposition offsets. Source
+collection, root catalog, manifest, optional zones, every STAC Item, and every
+target DSS file are checksum-bound. Hrefs are portable and relative to the
+output table.
+
+The command fails closed on incomplete or duplicate manifest coverage,
+non-passed validation, changed DSS bytes, inconsistent duration/watershed/grid
+identity, nonfinite precipitation features, or changed output content. An
+identical rerun is idempotent; to accept changed inputs, write a new
+release-addressed output path and review the new ``table_sha256``. Derivation
+reads NOAA AORC and may be long-running for a full catalog, so first exercise
+the API against a small fixture or development collection.
+
 Viewing Results
 ----------------
 Example Collection created for the indian-creek example data.

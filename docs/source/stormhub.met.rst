@@ -28,6 +28,14 @@ stormhub.met.consts module
    :undoc-members:
    :show-inheritance:
 
+stormhub.met.ensemble\_features module
+--------------------------------------
+
+.. automodule:: stormhub.met.ensemble_features
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 stormhub.met.storm\_catalog module
 ----------------------------------
 

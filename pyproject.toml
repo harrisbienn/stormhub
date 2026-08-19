@@ -51,6 +51,7 @@ repository = "https://github.com/dewberry/stormhub"
 
 [project.scripts]
 stormhub-server = "stormhub.server.serve:main"
+stormhub-export-ensemble-features = "stormhub.met.ensemble_features:main"
 
 [tool.pytest.ini_options]
 pythonpath = "stormhub"
