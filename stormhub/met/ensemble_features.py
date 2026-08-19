@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable
 from urllib.parse import urlsplit
@@ -726,7 +727,19 @@ def _write_table(output_path: Path, payload: dict) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(f".{output_path.name}.tmp")
     temporary.write_text(rendered, encoding="utf-8")
-    temporary.replace(output_path)
+    _replace_with_retry(temporary, output_path)
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    """Replace a file despite brief Windows reader/antivirus locks."""
+    for attempt in range(5):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1 * (2**attempt))
 
 
 def _checkpoint_identity(
@@ -809,7 +822,7 @@ def _write_checkpoint(
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(checkpoint_path)
+    _replace_with_retry(temporary, checkpoint_path)
 
 
 def export_ensemble_feature_table(

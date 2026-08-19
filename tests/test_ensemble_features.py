@@ -18,6 +18,7 @@ import xarray as xr
 from stormhub.met.ensemble_features import (
     FEATURE_TABLE_SCHEMA,
     _geodesic_zone_areas,
+    _replace_with_retry,
     _verify_precipitation_cube,
     _weighted_coefficient_of_variation,
     compute_precipitation_features,
@@ -500,6 +501,30 @@ def test_export_ensemble_feature_table_resumes_from_checkpoint(tmp_path) -> None
     assert resumed_calls == ["2"]
     assert payload["candidate_count"] == 2
     assert output_path.exists()
+
+
+def test_checkpoint_replace_retries_brief_windows_lock(monkeypatch, tmp_path) -> None:
+    """Retry an atomic replace when a concurrent Windows reader briefly locks it."""
+    source = tmp_path / "source.tmp"
+    target = tmp_path / "target.json"
+    source.write_text("new", encoding="utf-8")
+    target.write_text("old", encoding="utf-8")
+    real_replace = Path.replace
+    attempts = 0
+
+    def flaky_replace(path, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("simulated Windows reader lock")
+        return real_replace(path, destination)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    _replace_with_retry(source, target)
+
+    assert attempts == 3
+    assert target.read_text(encoding="utf-8") == "new"
 
 
 def test_export_ensemble_feature_table_rejects_tampered_checkpoint(tmp_path) -> None:
