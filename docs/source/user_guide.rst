@@ -170,6 +170,7 @@ tracked catalog paths and an output outside Git-managed source files:
       --manifest catalogs\lwi-region3\24hr-events\dss\dss-manifest.csv `
       --study-id deloutre `
       --zones <portable-path-to-reviewed-deloutre-subbasins> `
+      --checkpoint work\deloutre-24hr-ensemble-features.checkpoint.json `
       --output data\outputs\deloutre-24hr-ensemble-features.json
 
 The optional ``--zones`` dataset must be a single-file GeoJSON or GeoPackage
@@ -178,6 +179,10 @@ coefficient of variation uses zone-average event totals; without zones, it
 uses finite target-grid cells.
 The DeLoutre engineering review should supply the reviewed subbasin geometry
 so the spatial-distribution feature represents the intended hydrologic units.
+For a long export, ``--checkpoint`` records each completed candidate with its
+input identity and an integrity hash. An identical rerun resumes from that
+file; changed or tampered inputs fail closed. The checkpoint belongs under an
+ignored work directory and is not the published feature table.
 
 The export includes accumulation, hourly intensity, precipitation centroid,
 maximum-precipitation location, spatial coefficient of variation, peak timing,
