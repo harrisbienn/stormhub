@@ -239,11 +239,18 @@ def make_export_catalog(root: Path, *, item_count: int = 1) -> tuple[Path, Path]
 
 def fixture_provider(
     _catalog: pystac.Catalog,
-    _item: pystac.Item,
+    item: pystac.Item,
     _asset: pystac.Asset,
 ) -> tuple[xr.DataArray, dict]:
     """Return deterministic target precipitation without accessing NOAA AORC."""
-    return make_precipitation(), {"x_offset_m": 1000, "y_offset_m": -2000}
+    precipitation = make_precipitation().assign_coords(
+        time=pd.date_range(
+            pd.Timestamp(item.properties["start_datetime"]) + pd.Timedelta(hours=1),
+            periods=4,
+            freq="h",
+        )
+    )
+    return precipitation, {"x_offset_m": 1000, "y_offset_m": -2000}
 
 
 def canonical_sha256(payload: dict) -> str:
@@ -374,6 +381,90 @@ def test_export_ensemble_feature_table_rejects_tampered_dss(tmp_path) -> None:
         )
 
 
+def test_export_ensemble_feature_table_resumes_from_checkpoint(tmp_path) -> None:
+    """Resume completed candidates after a provider interruption."""
+    catalog_path, manifest_path = make_export_catalog(tmp_path / "catalog", item_count=2)
+    checkpoint_path = tmp_path / "work" / "features.checkpoint.json"
+    output_path = tmp_path / "features.json"
+    first_calls = []
+
+    def interrupted_provider(catalog, item, asset):
+        first_calls.append(item.id)
+        if item.id == "2":
+            raise RuntimeError("simulated network interruption")
+        return fixture_provider(catalog, item, asset)
+
+    with pytest.raises(RuntimeError, match="simulated network interruption"):
+        export_ensemble_feature_table(
+            catalog_path,
+            collection_id="4hr-events",
+            manifest_path=manifest_path,
+            study_id="test-study",
+            output_path=output_path,
+            checkpoint_path=checkpoint_path,
+            precipitation_provider=interrupted_provider,
+        )
+
+    assert first_calls == ["1", "2"]
+    assert not output_path.exists()
+    assert len(json.loads(checkpoint_path.read_text(encoding="utf-8"))["records"]) == 1
+    resumed_calls = []
+
+    def resumed_provider(catalog, item, asset):
+        resumed_calls.append(item.id)
+        return fixture_provider(catalog, item, asset)
+
+    payload = export_ensemble_feature_table(
+        catalog_path,
+        collection_id="4hr-events",
+        manifest_path=manifest_path,
+        study_id="test-study",
+        output_path=output_path,
+        checkpoint_path=checkpoint_path,
+        precipitation_provider=resumed_provider,
+    )
+
+    assert resumed_calls == ["2"]
+    assert payload["candidate_count"] == 2
+    assert output_path.exists()
+
+
+def test_export_ensemble_feature_table_rejects_tampered_checkpoint(tmp_path) -> None:
+    """Reject checkpoint bytes changed after their integrity hash was recorded."""
+    catalog_path, manifest_path = make_export_catalog(tmp_path / "catalog", item_count=2)
+    checkpoint_path = tmp_path / "features.checkpoint.json"
+
+    def interrupted_provider(catalog, item, asset):
+        if item.id == "2":
+            raise RuntimeError("stop")
+        return fixture_provider(catalog, item, asset)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        export_ensemble_feature_table(
+            catalog_path,
+            collection_id="4hr-events",
+            manifest_path=manifest_path,
+            study_id="test-study",
+            output_path=tmp_path / "features.json",
+            checkpoint_path=checkpoint_path,
+            precipitation_provider=interrupted_provider,
+        )
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["records"][0]["rank"] = 99
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checkpoint hash mismatch"):
+        export_ensemble_feature_table(
+            catalog_path,
+            collection_id="4hr-events",
+            manifest_path=manifest_path,
+            study_id="test-study",
+            output_path=tmp_path / "features.json",
+            checkpoint_path=checkpoint_path,
+            precipitation_provider=fixture_provider,
+        )
+
+
 def test_ensemble_feature_cli_passes_explicit_inputs(monkeypatch, capsys, tmp_path) -> None:
     """Expose the package exporter through a Windows-friendly console command."""
     captured = {}
@@ -397,6 +488,8 @@ def test_ensemble_feature_cli_passes_explicit_inputs(monkeypatch, capsys, tmp_pa
             "deloutre",
             "--zones",
             "subbasins.geojson",
+            "--checkpoint",
+            "features.checkpoint.json",
             "--output",
             str(output),
         ]
@@ -410,6 +503,7 @@ def test_ensemble_feature_cli_passes_explicit_inputs(monkeypatch, capsys, tmp_pa
         "study_id": "deloutre",
         "output_path": str(output),
         "zones_path": "subbasins.geojson",
+        "checkpoint_path": "features.checkpoint.json",
     }
     summary = json.loads(capsys.readouterr().out)
     assert summary["status"] == "passed"

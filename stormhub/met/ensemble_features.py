@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -33,6 +34,7 @@ from stormhub.met.zarr_to_dss import (
 from stormhub.utils import sha256_file, sha256_multihash
 
 FEATURE_TABLE_SCHEMA = "floodforecast/ensemble-feature-table/1.0"
+FEATURE_CHECKPOINT_SCHEMA = "stormhub/ensemble-feature-checkpoint/1.0"
 REQUIRED_MANIFEST_COLUMNS = {
     "item_id",
     "rank",
@@ -723,6 +725,89 @@ def _write_table(output_path: Path, payload: dict) -> None:
     temporary.replace(output_path)
 
 
+def _checkpoint_identity(
+    *,
+    catalog_file: Path,
+    collection_file: Path,
+    collection_id: str,
+    manifest_file: Path,
+    output_file: Path,
+    study_id: str,
+    zones_file: Path | None,
+) -> dict:
+    """Authenticate result-defining inputs for a local resume checkpoint."""
+    return {
+        "feature_table_schema": FEATURE_TABLE_SCHEMA,
+        "feature_algorithm": "covered-zone-area-v1",
+        "collection_id": collection_id,
+        "catalog_sha256": sha256_file(catalog_file),
+        "collection_sha256": sha256_file(collection_file),
+        "manifest_sha256": sha256_file(manifest_file),
+        "zones_sha256": sha256_file(zones_file) if zones_file is not None else None,
+        "study_id": study_id,
+        "output_path": str(output_file),
+    }
+
+
+def _load_checkpoint(checkpoint_path: Path, *, identity: dict) -> tuple[list[dict], tuple[int, ...] | None]:
+    """Load an authenticated checkpoint whose inputs exactly match this run."""
+    if not checkpoint_path.exists():
+        return [], None
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid ensemble feature checkpoint JSON: {checkpoint_path}") from exc
+    if not isinstance(payload, dict) or payload.get("schema") != FEATURE_CHECKPOINT_SCHEMA:
+        raise ValueError(f"Unsupported ensemble feature checkpoint: {checkpoint_path}")
+    expected_hash = str(payload.get("checkpoint_sha256", ""))
+    if expected_hash != _canonical_sha256(payload, hash_key="checkpoint_sha256"):
+        raise ValueError(f"Ensemble feature checkpoint hash mismatch: {checkpoint_path}")
+    if payload.get("identity") != identity:
+        raise ValueError(f"Ensemble feature checkpoint inputs do not match this run: {checkpoint_path}")
+    records = payload.get("records")
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise ValueError(f"Ensemble feature checkpoint records are invalid: {checkpoint_path}")
+    scenario_ids = [record.get("source_scenario_id") for record in records]
+    if any(not isinstance(value, str) or not value for value in scenario_ids) or len(scenario_ids) != len(
+        set(scenario_ids)
+    ):
+        raise ValueError(f"Ensemble feature checkpoint scenario identities are invalid: {checkpoint_path}")
+    raw_coverage = payload.get("covered_zone_indices")
+    if raw_coverage is None:
+        coverage = None
+    elif not isinstance(raw_coverage, list) or any(
+        not isinstance(index, int) or index < 0 for index in raw_coverage
+    ):
+        raise ValueError(f"Ensemble feature checkpoint coverage is invalid: {checkpoint_path}")
+    else:
+        coverage = tuple(raw_coverage)
+    return records, coverage
+
+
+def _write_checkpoint(
+    checkpoint_path: Path,
+    *,
+    identity: dict,
+    records: list[dict],
+    covered_zone_indices: tuple[int, ...] | None,
+) -> None:
+    """Atomically replace a local checkpoint after one completed candidate."""
+    payload = {
+        "schema": FEATURE_CHECKPOINT_SCHEMA,
+        "identity": identity,
+        "covered_zone_indices": list(covered_zone_indices) if covered_zone_indices is not None else None,
+        "records": records,
+    }
+    payload["checkpoint_sha256"] = _canonical_sha256(payload)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(checkpoint_path)
+
+
 def export_ensemble_feature_table(
     catalog_path: str | Path,
     *,
@@ -731,6 +816,7 @@ def export_ensemble_feature_table(
     study_id: str,
     output_path: str | Path,
     zones_path: str | Path | None = None,
+    checkpoint_path: str | Path | None = None,
     precipitation_provider: Callable[[pystac.Catalog, pystac.Item, pystac.Asset], tuple[xr.DataArray, dict]]
     | None = None,
 ) -> dict:
@@ -744,6 +830,7 @@ def export_ensemble_feature_table(
     catalog_file = Path(catalog_path).resolve()
     manifest_file = Path(manifest_path).resolve()
     output_file = Path(output_path).resolve()
+    checkpoint_file = Path(checkpoint_path).resolve() if checkpoint_path is not None else None
     if not study_id.strip():
         raise ValueError("study_id must be non-empty.")
     if not catalog_file.is_file():
@@ -791,11 +878,30 @@ def export_ensemble_feature_table(
 
     provider = precipitation_provider or _derive_target_precipitation
     output_dir = output_file.parent
+    checkpoint_identity = _checkpoint_identity(
+        catalog_file=catalog_file,
+        collection_file=collection_file,
+        collection_id=collection_id,
+        manifest_file=manifest_file,
+        output_file=output_file,
+        study_id=study_id.strip(),
+        zones_file=zones_file,
+    )
+    if checkpoint_file is None:
+        checkpoint_records = []
+        table_covered_zone_indices = None
+    else:
+        checkpoint_records, table_covered_zone_indices = _load_checkpoint(
+            checkpoint_file,
+            identity=checkpoint_identity,
+        )
+    checkpoint_by_id = {record["source_scenario_id"]: record for record in checkpoint_records}
+    if set(checkpoint_by_id) - set(items):
+        raise ValueError("Ensemble feature checkpoint contains a scenario outside the collection.")
     records = []
     table_duration = None
     table_watershed = None
-    table_covered_zone_indices = None
-    for _, row in targets.iterrows():
+    for position, (_, row) in enumerate(targets.iterrows(), start=1):
         item = items[row["item_id"]]
         item_href = item.get_self_href()
         if item_href is None:
@@ -826,6 +932,22 @@ def export_ensemble_feature_table(
         if duration_hours != table_duration or watershed_id != table_watershed:
             raise ValueError("All feature-table candidates must share one duration and target watershed.")
 
+        checkpoint_record = checkpoint_by_id.get(item.id)
+        if checkpoint_record is not None:
+            expected_rank = int(row["_rank"])
+            if (
+                checkpoint_record.get("rank") != expected_rank
+                or checkpoint_record.get("stac_item_id") != item.id
+                or checkpoint_record.get("stac_item_sha256") != sha256_file(item_file)
+                or checkpoint_record.get("target_dss", {}).get("checksum")
+                != target_asset.extra_fields["file:checksum"]
+                or checkpoint_record.get("target_dss", {}).get("bytes") != target_path.stat().st_size
+            ):
+                raise ValueError(f"Ensemble feature checkpoint record for '{item.id}' is stale.")
+            records.append(checkpoint_record)
+            logging.info("Resumed ensemble feature %s/%s for item %s", position, len(targets), item.id)
+            continue
+
         precipitation, translation = provider(catalog, item, target_asset)
         grid = _grid_record(item, target_asset, watershed_id)
         _verify_precipitation_cube(item, precipitation, grid, duration_hours)
@@ -850,24 +972,31 @@ def export_ensemble_feature_table(
                 "offset_distance_m": _rounded(math.hypot(x_offset, y_offset)),
             }
         )
-        records.append(
-            {
-                "source_scenario_id": item.id,
-                "rank": int(row["_rank"]),
-                "stac_item_id": item.id,
-                "stac_item_href": _portable_relative_href(item_file, output_dir),
-                "stac_item_sha256": sha256_file(item_file),
-                "target_dss": {
-                    "href": _portable_relative_href(target_path, output_dir),
-                    "checksum": target_asset.extra_fields["file:checksum"],
-                    "bytes": target_path.stat().st_size,
-                    "validation_status": "passed",
-                },
-                "forcing": _forcing_record(item, target_asset, duration_hours),
-                "grid": grid,
-                "features": features,
-            }
-        )
+        record = {
+            "source_scenario_id": item.id,
+            "rank": int(row["_rank"]),
+            "stac_item_id": item.id,
+            "stac_item_href": _portable_relative_href(item_file, output_dir),
+            "stac_item_sha256": sha256_file(item_file),
+            "target_dss": {
+                "href": _portable_relative_href(target_path, output_dir),
+                "checksum": target_asset.extra_fields["file:checksum"],
+                "bytes": target_path.stat().st_size,
+                "validation_status": "passed",
+            },
+            "forcing": _forcing_record(item, target_asset, duration_hours),
+            "grid": grid,
+            "features": features,
+        }
+        records.append(record)
+        if checkpoint_file is not None:
+            _write_checkpoint(
+                checkpoint_file,
+                identity=checkpoint_identity,
+                records=records,
+                covered_zone_indices=table_covered_zone_indices,
+            )
+        logging.info("Completed ensemble feature %s/%s for item %s", position, len(targets), item.id)
 
     source = {
         "owner_repository": "stormhub",
@@ -934,6 +1063,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--study-id", required=True, help="Consumer study identity recorded in the table.")
     parser.add_argument("--output", required=True, help="New JSON feature-table path.")
     parser.add_argument(
+        "--checkpoint",
+        help="Optional local JSON checkpoint. Matching reruns resume completed candidates.",
+    )
+    parser.add_argument(
         "--zones",
         help=(
             "Optional target-zone vector dataset. When provided, spatial_accumulation_cv "
@@ -954,6 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
         study_id=args.study_id,
         output_path=args.output,
         zones_path=args.zones,
+        checkpoint_path=args.checkpoint,
     )
     print(
         json.dumps(
