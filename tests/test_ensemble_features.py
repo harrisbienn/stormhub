@@ -17,6 +17,8 @@ import xarray as xr
 
 from stormhub.met.ensemble_features import (
     FEATURE_TABLE_SCHEMA,
+    _geodesic_zone_areas,
+    _weighted_coefficient_of_variation,
     compute_precipitation_features,
     export_ensemble_feature_table,
     main,
@@ -67,12 +69,12 @@ def test_compute_precipitation_features_covers_required_categories() -> None:
 
 
 def test_compute_precipitation_features_uses_explicit_target_zones() -> None:
-    """Use zone-average event totals for the spatial-distribution metric."""
+    """Weight zone-average event totals by their forcing-covered area."""
     zones = gpd.GeoDataFrame(
         {"zone_id": ["west", "east"]},
         geometry=[
             Polygon([(0, 0), (1000, 0), (1000, 2000), (0, 2000)]),
-            Polygon([(1000, 0), (2000, 0), (2000, 2000), (1000, 2000)]),
+            Polygon([(1000, 0), (3000, 0), (3000, 2000), (1000, 2000)]),
         ],
         crs="EPSG:5070",
     )
@@ -80,6 +82,50 @@ def test_compute_precipitation_features_uses_explicit_target_zones() -> None:
     features = compute_precipitation_features(make_precipitation(), zones=zones)
 
     assert features["spatial_accumulation_cv"] == pytest.approx(0.11111111)
+
+
+def test_compute_precipitation_features_excludes_zero_coverage_zone() -> None:
+    """Exclude a model zone outside finite forcing while retaining covered zones."""
+    zones = gpd.GeoDataFrame(
+        {"zone_id": ["west", "east", "outside"]},
+        geometry=[
+            Polygon([(0, 0), (1000, 0), (1000, 2000), (0, 2000)]),
+            Polygon([(1000, 0), (2000, 0), (2000, 2000), (1000, 2000)]),
+            Polygon([(3000, 0), (4000, 0), (4000, 1000), (3000, 1000)]),
+        ],
+        crs="EPSG:5070",
+    )
+
+    features = compute_precipitation_features(make_precipitation(), zones=zones)
+
+    assert features["spatial_accumulation_cv"] == pytest.approx(0.11111111)
+
+
+def test_weighted_coefficient_of_variation_rejects_invalid_weights() -> None:
+    """Require one finite positive area weight for every zonal value."""
+    values = np.asarray([4.0, 5.0])
+
+    assert _weighted_coefficient_of_variation(
+        values,
+        np.asarray([1.0, 3.0]),
+        label="test zones",
+    ) == pytest.approx(0.0911605688)
+    with pytest.raises(ValueError, match="same non-zero length"):
+        _weighted_coefficient_of_variation(values, np.asarray([1.0]), label="test zones")
+    with pytest.raises(ValueError, match="finite and positive"):
+        _weighted_coefficient_of_variation(values, np.asarray([1.0, 0.0]), label="test zones")
+
+
+def test_geodesic_zone_areas_rejects_zero_area_geometry() -> None:
+    """Reject a target zone that cannot supply a positive area weight."""
+    zones = gpd.GeoDataFrame(
+        {"zone_id": ["degenerate"]},
+        geometry=[Polygon([(0, 0), (1000, 0), (2000, 0), (0, 0)])],
+        crs="EPSG:5070",
+    )
+
+    with pytest.raises(ValueError, match="valid positive source geometry area"):
+        _geodesic_zone_areas(zones)
 
 
 def make_export_catalog(root: Path, *, item_count: int = 1) -> tuple[Path, Path]:
@@ -296,7 +342,19 @@ def test_export_ensemble_feature_table_authenticates_zone_file(tmp_path) -> None
     )
 
     assert payload["source"]["zones_sha256"] == sha256_file(zones_path)
-    assert payload["spatial_distribution_basis"] == {"type": "target_zones", "zone_count": 2}
+    assert payload["spatial_distribution_basis"] == {
+        "type": "target_zones",
+        "zone_count": 2,
+        "covered_zone_count": 2,
+        "excluded_zero_coverage_zone_ids": [],
+        "zone_id_field": "zone_id",
+        "statistic": "area-weighted-population-cv-of-covered-zone-mean-event-accumulation",
+        "weighting": "forcing-covered-polygon-area",
+        "area_method": "WGS84-geodesic",
+        "coverage_method": "finite-target-grid-cell-footprint",
+        "zone_mean_method": "equal-finite-grid-cell",
+        "metric_definition_status": "provisional",
+    }
 
 
 def test_export_ensemble_feature_table_rejects_tampered_dss(tmp_path) -> None:

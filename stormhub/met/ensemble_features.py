@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 import pystac
 import xarray as xr
-from pyproj import CRS
-from rasterio.features import geometry_mask
+from pyproj import CRS, Geod
+from rasterio.features import geometry_mask, shapes
 from shapely.geometry import mapping, shape
 
 from stormhub.met.storm_catalog import source_watershed_geometry
@@ -103,7 +103,10 @@ BASE_FEATURE_DEFINITIONS = (
         "name": "spatial_accumulation_cv",
         "category": "spatial_distribution",
         "units": "ratio",
-        "description": "Population coefficient of variation of event-total precipitation over the configured spatial basis.",
+        "description": (
+            "Population coefficient of variation of event-total precipitation over the configured spatial basis; "
+            "target-zone values are weighted by their forcing-covered geodesic area."
+        ),
         "owner": "stormhub",
     },
     {
@@ -225,8 +228,68 @@ def _coefficient_of_variation(values: np.ndarray, *, label: str) -> float:
     return float(np.std(finite, ddof=0) / mean)
 
 
-def _zonal_accumulations(event_total: xr.DataArray, zones: gpd.GeoDataFrame) -> np.ndarray:
-    """Return mean event accumulation for every configured target zone."""
+def _weighted_coefficient_of_variation(
+    values: np.ndarray,
+    weights: np.ndarray,
+    *,
+    label: str,
+) -> float:
+    """Calculate a weighted population coefficient of variation."""
+    finite_values = np.asarray(values, dtype=float)
+    finite_weights = np.asarray(weights, dtype=float)
+    if finite_values.ndim != 1 or finite_weights.ndim != 1:
+        raise ValueError(f"{label} values and weights must be one-dimensional.")
+    if finite_values.size == 0 or finite_values.size != finite_weights.size:
+        raise ValueError(f"{label} values and weights must have the same non-zero length.")
+    if not np.isfinite(finite_values).all():
+        raise ValueError(f"{label} contains a non-finite precipitation value.")
+    if not np.isfinite(finite_weights).all() or np.any(finite_weights <= 0):
+        raise ValueError(f"{label} weights must be finite and positive.")
+    mean = float(np.average(finite_values, weights=finite_weights))
+    if mean <= 0:
+        raise ValueError(f"{label} weighted mean precipitation must be positive.")
+    variance = float(np.average((finite_values - mean) ** 2, weights=finite_weights))
+    return float(math.sqrt(variance) / mean)
+
+
+def _geodesic_zone_areas(zones: gpd.GeoDataFrame) -> np.ndarray:
+    """Return positive WGS84 geodesic polygon areas in square metres."""
+    for index, geometry in enumerate(zones.geometry):
+        if geometry is None or geometry.is_empty:
+            raise ValueError(f"Feature zone {index} has empty geometry.")
+        source_area = float(geometry.area)
+        if not geometry.is_valid or not math.isfinite(source_area) or source_area <= 0:
+            raise ValueError(f"Feature zone {index} must have valid positive source geometry area.")
+    geographic = zones.to_crs("EPSG:4326")
+    geod = Geod(ellps="WGS84")
+    areas = []
+    for index, geometry in enumerate(geographic.geometry):
+        if geometry is None or geometry.is_empty:
+            raise ValueError(f"Feature zone {index} has empty geometry.")
+        area, _ = geod.geometry_area_perimeter(geometry)
+        absolute_area = abs(float(area))
+        if not math.isfinite(absolute_area) or absolute_area <= 0:
+            raise ValueError(f"Feature zone {index} must have finite positive geodesic area.")
+        areas.append(absolute_area)
+    return np.asarray(areas, dtype=float)
+
+
+def _zone_identifiers(zones: gpd.GeoDataFrame) -> tuple[str, tuple[str, ...]]:
+    """Return stable, unique zone identifiers for authenticated diagnostics."""
+    for field in ("zone_id", "subbasin_id", "name", "id"):
+        if field not in zones.columns:
+            continue
+        identifiers = tuple(str(value).strip() for value in zones[field])
+        if all(identifiers) and len(set(identifiers)) == len(identifiers):
+            return field, identifiers
+    return "$feature_index", tuple(str(index) for index in range(len(zones)))
+
+
+def _zonal_accumulations(
+    event_total: xr.DataArray,
+    zones: gpd.GeoDataFrame,
+) -> tuple[np.ndarray, np.ndarray, tuple[int, ...]]:
+    """Return means and areas for zones intersecting finite forcing coverage."""
     if zones.empty:
         raise ValueError("Feature-zone geometry contains no records.")
     if zones.crs is None:
@@ -234,15 +297,38 @@ def _zonal_accumulations(event_total: xr.DataArray, zones: gpd.GeoDataFrame) -> 
     target_crs = event_total.rio.crs
     if target_crs is None:
         raise ValueError("Target precipitation grid must declare a CRS.")
+    # Validate every supplied source geometry even when it is outside forcing
+    # coverage. This keeps an excluded zone from hiding malformed evidence.
+    _geodesic_zone_areas(zones)
     projected = zones.to_crs(target_crs)
     values = np.asarray(event_total.values, dtype=float)
     transform = event_total.rio.transform(recalc=True)
+    finite_mask = np.isfinite(values)
+    coverage_parts = [
+        shape(geometry)
+        for geometry, value in shapes(
+            finite_mask.astype(np.uint8),
+            mask=finite_mask,
+            transform=transform,
+        )
+        if value == 1
+    ]
+    if not coverage_parts:
+        raise ValueError("Target precipitation does not contain a finite spatial footprint.")
+    coverage = coverage_parts[0]
+    for part in coverage_parts[1:]:
+        coverage = coverage.union(part)
     zone_means = []
+    covered_geometries = []
+    covered_indices = []
     for index, geometry in enumerate(projected.geometry):
         if geometry is None or geometry.is_empty:
             raise ValueError(f"Feature zone {index} has empty geometry.")
+        covered_geometry = geometry.intersection(coverage)
+        if covered_geometry.is_empty or covered_geometry.area <= 0:
+            continue
         mask = geometry_mask(
-            [mapping(geometry)],
+            [mapping(covered_geometry)],
             out_shape=values.shape,
             transform=transform,
             all_touched=True,
@@ -250,22 +336,32 @@ def _zonal_accumulations(event_total: xr.DataArray, zones: gpd.GeoDataFrame) -> 
         )
         selected = values[mask & np.isfinite(values)]
         if selected.size == 0:
-            raise ValueError(f"Feature zone {index} does not overlap a finite target-grid cell.")
+            continue
         zone_means.append(float(np.mean(selected)))
-    return np.asarray(zone_means, dtype=float)
+        covered_geometries.append(covered_geometry)
+        covered_indices.append(index)
+    if len(zone_means) < 2:
+        raise ValueError("At least two feature zones must intersect finite target precipitation.")
+    covered = gpd.GeoDataFrame(
+        geometry=covered_geometries,
+        crs=target_crs,
+    )
+    zone_areas = _geodesic_zone_areas(covered)
+    return np.asarray(zone_means, dtype=float), zone_areas, tuple(covered_indices)
 
 
-def compute_precipitation_features(
+def _compute_precipitation_features(
     precipitation: xr.DataArray,
     *,
     zones: gpd.GeoDataFrame | None = None,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], tuple[int, ...] | None]:
     """Derive deterministic accumulation, intensity, spatial, and temporal metrics.
 
     ``precipitation`` must be an hourly target-location grid with one time and
     two rioxarray spatial dimensions. When ``zones`` is supplied, the spatial
-    coefficient of variation is calculated across zone-average event totals;
-    otherwise it is calculated across finite target-grid cells.
+    coefficient of variation is calculated across zone-average event totals
+    using geodesic polygon-area weights; otherwise it is calculated across
+    finite target-grid cells.
     """
     if "time" not in precipitation.dims:
         raise ValueError("Target precipitation must contain a time dimension.")
@@ -327,7 +423,16 @@ def compute_precipitation_features(
         index = max(0, math.ceil(time_steps * fraction) - 1)
         return float(cumulative[index])
 
-    spatial_values = _zonal_accumulations(event_total, zones) if zones is not None else cell_totals
+    if zones is None:
+        spatial_cv = _coefficient_of_variation(cell_totals, label="spatial accumulation")
+        covered_zone_indices = None
+    else:
+        spatial_values, spatial_weights, covered_zone_indices = _zonal_accumulations(event_total, zones)
+        spatial_cv = _weighted_coefficient_of_variation(
+            spatial_values,
+            spatial_weights,
+            label="spatial accumulation",
+        )
     return {
         "accumulation_mean_mm": _rounded(float(np.mean(cell_totals))),
         "accumulation_max_mm": _rounded(float(np.max(cell_totals))),
@@ -336,12 +441,22 @@ def compute_precipitation_features(
         "precipitation_centroid_y_m": _rounded(centroid_y),
         "maximum_precipitation_x_m": _rounded(float(x_grid[maximum_index])),
         "maximum_precipitation_y_m": _rounded(float(y_grid[maximum_index])),
-        "spatial_accumulation_cv": _rounded(_coefficient_of_variation(spatial_values, label="spatial accumulation")),
+        "spatial_accumulation_cv": _rounded(spatial_cv),
         "peak_time_fraction": _rounded((int(np.argmax(hourly_means)) + 1) / time_steps),
         "cumulative_fraction_at_25pct": _rounded(cumulative_at(0.25)),
         "cumulative_fraction_at_50pct": _rounded(cumulative_at(0.50)),
         "cumulative_fraction_at_75pct": _rounded(cumulative_at(0.75)),
-    }
+    }, covered_zone_indices
+
+
+def compute_precipitation_features(
+    precipitation: xr.DataArray,
+    *,
+    zones: gpd.GeoDataFrame | None = None,
+) -> dict[str, float]:
+    """Derive deterministic precipitation features for a target forcing cube."""
+    features, _ = _compute_precipitation_features(precipitation, zones=zones)
+    return features
 
 
 def _catalog_item(catalog: pystac.Catalog, item_id: str) -> pystac.Item:
@@ -679,6 +794,7 @@ def export_ensemble_feature_table(
     records = []
     table_duration = None
     table_watershed = None
+    table_covered_zone_indices = None
     for _, row in targets.iterrows():
         item = items[row["item_id"]]
         item_href = item.get_self_href()
@@ -713,7 +829,14 @@ def export_ensemble_feature_table(
         precipitation, translation = provider(catalog, item, target_asset)
         grid = _grid_record(item, target_asset, watershed_id)
         _verify_precipitation_cube(item, precipitation, grid, duration_hours)
-        features = compute_precipitation_features(precipitation, zones=zones)
+        features, covered_zone_indices = _compute_precipitation_features(precipitation, zones=zones)
+        if zones is not None:
+            if table_covered_zone_indices is None:
+                table_covered_zone_indices = covered_zone_indices
+            elif covered_zone_indices != table_covered_zone_indices:
+                raise ValueError(
+                    "All feature-table candidates must have the same finite target-zone coverage."
+                )
         x_offset = _finite_number(row["x_offset_m"], label="manifest x_offset_m")
         y_offset = _finite_number(row["y_offset_m"], label="manifest y_offset_m")
         for key, value in (("x_offset_m", x_offset), ("y_offset_m", y_offset)):
@@ -755,11 +878,31 @@ def export_ensemble_feature_table(
         "root_catalog_href": _portable_relative_href(catalog_file, output_dir),
         "root_catalog_sha256": sha256_file(catalog_file),
     }
-    spatial_basis = {"type": "target_grid_cells"}
+    spatial_basis = {
+        "type": "target_grid_cells",
+        "statistic": "population-cv-of-cell-event-accumulation",
+        "weighting": "equal-cell",
+    }
     if zones_file is not None:
+        if table_covered_zone_indices is None:
+            raise ValueError("Target-zone coverage was not derived for the feature table.")
+        zone_id_field, zone_ids = _zone_identifiers(zones)
+        excluded_zone_indices = sorted(set(range(len(zones))) - set(table_covered_zone_indices))
         source["zones_href"] = _portable_relative_href(zones_file, output_dir)
         source["zones_sha256"] = sha256_file(zones_file)
-        spatial_basis = {"type": "target_zones", "zone_count": len(zones)}
+        spatial_basis = {
+            "type": "target_zones",
+            "zone_count": len(zones),
+            "covered_zone_count": len(table_covered_zone_indices),
+            "excluded_zero_coverage_zone_ids": [zone_ids[index] for index in excluded_zone_indices],
+            "zone_id_field": zone_id_field,
+            "statistic": "area-weighted-population-cv-of-covered-zone-mean-event-accumulation",
+            "weighting": "forcing-covered-polygon-area",
+            "area_method": "WGS84-geodesic",
+            "coverage_method": "finite-target-grid-cell-footprint",
+            "zone_mean_method": "equal-finite-grid-cell",
+            "metric_definition_status": "provisional",
+        }
 
     payload = {
         "schema": FEATURE_TABLE_SCHEMA,
@@ -794,7 +937,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--zones",
         help=(
             "Optional target-zone vector dataset. When provided, spatial_accumulation_cv "
-            "is calculated across zone-average event totals instead of grid cells."
+            "is calculated across covered-zone-average event totals using WGS84 geodesic "
+            "forcing-covered polygon-area weights instead of grid cells."
         ),
     )
     return parser
