@@ -893,12 +893,30 @@ def export_ensemble_feature_table(
     )
     if checkpoint_file is None:
         checkpoint_records = []
-        table_covered_zone_indices = None
+        legacy_covered_zone_indices = None
     else:
-        checkpoint_records, table_covered_zone_indices = _load_checkpoint(
+        checkpoint_records, legacy_covered_zone_indices = _load_checkpoint(
             checkpoint_file,
             identity=checkpoint_identity,
         )
+    zone_id_field = None
+    zone_ids = None
+    if zones is not None:
+        zone_id_field, zone_ids = _zone_identifiers(zones)
+        if checkpoint_records and any(
+            "spatial_distribution_coverage" not in record for record in checkpoint_records
+        ):
+            if legacy_covered_zone_indices is None:
+                raise ValueError("Ensemble feature checkpoint lacks target-zone coverage metadata.")
+            legacy_excluded = sorted(set(range(len(zones))) - set(legacy_covered_zone_indices))
+            for record in checkpoint_records:
+                record.setdefault(
+                    "spatial_distribution_coverage",
+                    {
+                        "covered_zone_count": len(legacy_covered_zone_indices),
+                        "excluded_zero_coverage_zone_ids": [zone_ids[index] for index in legacy_excluded],
+                    },
+                )
     checkpoint_by_id = {record["source_scenario_id"]: record for record in checkpoint_records}
     if set(checkpoint_by_id) - set(items):
         raise ValueError("Ensemble feature checkpoint contains a scenario outside the collection.")
@@ -956,13 +974,6 @@ def export_ensemble_feature_table(
         grid = _grid_record(item, target_asset, watershed_id)
         _verify_precipitation_cube(item, precipitation, grid, duration_hours)
         features, covered_zone_indices = _compute_precipitation_features(precipitation, zones=zones)
-        if zones is not None:
-            if table_covered_zone_indices is None:
-                table_covered_zone_indices = covered_zone_indices
-            elif covered_zone_indices != table_covered_zone_indices:
-                raise ValueError(
-                    "All feature-table candidates must have the same finite target-zone coverage."
-                )
         x_offset = _finite_number(row["x_offset_m"], label="manifest x_offset_m")
         y_offset = _finite_number(row["y_offset_m"], label="manifest y_offset_m")
         for key, value in (("x_offset_m", x_offset), ("y_offset_m", y_offset)):
@@ -992,13 +1003,19 @@ def export_ensemble_feature_table(
             "grid": grid,
             "features": features,
         }
+        if zones is not None:
+            excluded_zone_indices = sorted(set(range(len(zones))) - set(covered_zone_indices))
+            record["spatial_distribution_coverage"] = {
+                "covered_zone_count": len(covered_zone_indices),
+                "excluded_zero_coverage_zone_ids": [zone_ids[index] for index in excluded_zone_indices],
+            }
         records.append(record)
         if checkpoint_file is not None:
             _write_checkpoint(
                 checkpoint_file,
                 identity=checkpoint_identity,
                 records=records,
-                covered_zone_indices=table_covered_zone_indices,
+                covered_zone_indices=None,
             )
         logging.info("Completed ensemble feature %s/%s for item %s", position, len(targets), item.id)
 
@@ -1017,22 +1034,25 @@ def export_ensemble_feature_table(
         "weighting": "equal-cell",
     }
     if zones_file is not None:
-        if table_covered_zone_indices is None:
-            raise ValueError("Target-zone coverage was not derived for the feature table.")
-        zone_id_field, zone_ids = _zone_identifiers(zones)
-        excluded_zone_indices = sorted(set(range(len(zones))) - set(table_covered_zone_indices))
+        coverage_records = [record["spatial_distribution_coverage"] for record in records]
+        covered_counts = [record["covered_zone_count"] for record in coverage_records]
+        excluded_sets = [set(record["excluded_zero_coverage_zone_ids"]) for record in coverage_records]
+        always_excluded = set.intersection(*excluded_sets)
+        ever_excluded = set.union(*excluded_sets)
         source["zones_href"] = _portable_relative_href(zones_file, output_dir)
         source["zones_sha256"] = sha256_file(zones_file)
         spatial_basis = {
             "type": "target_zones",
             "zone_count": len(zones),
-            "covered_zone_count": len(table_covered_zone_indices),
-            "excluded_zero_coverage_zone_ids": [zone_ids[index] for index in excluded_zone_indices],
+            "covered_zone_count_min": min(covered_counts),
+            "covered_zone_count_max": max(covered_counts),
+            "always_excluded_zero_coverage_zone_ids": sorted(always_excluded),
+            "variably_excluded_zero_coverage_zone_ids": sorted(ever_excluded - always_excluded),
             "zone_id_field": zone_id_field,
             "statistic": "area-weighted-population-cv-of-covered-zone-mean-event-accumulation",
             "weighting": "forcing-covered-polygon-area",
             "area_method": "WGS84-geodesic",
-            "coverage_method": "finite-target-grid-cell-footprint",
+            "coverage_method": "per-event-finite-target-grid-cell-footprint",
             "zone_mean_method": "equal-finite-grid-cell",
             "metric_definition_status": "provisional",
         }

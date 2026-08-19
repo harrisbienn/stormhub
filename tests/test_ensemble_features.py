@@ -378,16 +378,63 @@ def test_export_ensemble_feature_table_authenticates_zone_file(tmp_path) -> None
     assert payload["spatial_distribution_basis"] == {
         "type": "target_zones",
         "zone_count": 2,
-        "covered_zone_count": 2,
-        "excluded_zero_coverage_zone_ids": [],
+        "covered_zone_count_min": 2,
+        "covered_zone_count_max": 2,
+        "always_excluded_zero_coverage_zone_ids": [],
+        "variably_excluded_zero_coverage_zone_ids": [],
         "zone_id_field": "zone_id",
         "statistic": "area-weighted-population-cv-of-covered-zone-mean-event-accumulation",
         "weighting": "forcing-covered-polygon-area",
         "area_method": "WGS84-geodesic",
-        "coverage_method": "finite-target-grid-cell-footprint",
+        "coverage_method": "per-event-finite-target-grid-cell-footprint",
         "zone_mean_method": "equal-finite-grid-cell",
         "metric_definition_status": "provisional",
     }
+    assert payload["records"][0]["spatial_distribution_coverage"] == {
+        "covered_zone_count": 2,
+        "excluded_zero_coverage_zone_ids": [],
+    }
+
+
+def test_export_ensemble_feature_table_records_variable_zone_coverage(tmp_path) -> None:
+    """Preserve per-event missing coverage without changing the source geometry."""
+    catalog_path, manifest_path = make_export_catalog(tmp_path / "catalog", item_count=2)
+    zones_path = tmp_path / "zones.gpkg"
+    gpd.GeoDataFrame(
+        {"zone_id": ["northwest", "southwest", "east"]},
+        geometry=[
+            Polygon([(0, 1100), (900, 1100), (900, 2000), (0, 2000)]),
+            Polygon([(0, 0), (900, 0), (900, 900), (0, 900)]),
+            Polygon([(1100, 0), (2000, 0), (2000, 2000), (1100, 2000)]),
+        ],
+        crs="EPSG:5070",
+    ).to_file(zones_path)
+
+    def variable_coverage_provider(catalog, item, asset):
+        precipitation, translation = fixture_provider(catalog, item, asset)
+        if item.id == "2":
+            precipitation.values[:, 0, 0] = np.nan
+        return precipitation, translation
+
+    payload = export_ensemble_feature_table(
+        catalog_path,
+        collection_id="4hr-events",
+        manifest_path=manifest_path,
+        study_id="test-study",
+        output_path=tmp_path / "features.json",
+        zones_path=zones_path,
+        precipitation_provider=variable_coverage_provider,
+    )
+
+    basis = payload["spatial_distribution_basis"]
+    assert basis["covered_zone_count_min"] == 2
+    assert basis["covered_zone_count_max"] == 3
+    assert basis["always_excluded_zero_coverage_zone_ids"] == []
+    assert basis["variably_excluded_zero_coverage_zone_ids"] == ["northwest"]
+    assert [
+        record["spatial_distribution_coverage"]["covered_zone_count"]
+        for record in payload["records"]
+    ] == [3, 2]
 
 
 def test_export_ensemble_feature_table_rejects_tampered_dss(tmp_path) -> None:
