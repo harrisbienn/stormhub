@@ -39,6 +39,12 @@ The catalog stores USGS gage items with:
 ### STAC Server
 StormHub includes an HTTP server that serves STAC items locally, allowing users to visualize and explore catalogs for both storms and stream gages. The server integrates with [Radiant Earth's STAC Browser](https://github.com/radiantearth/stac-browser) for seamless data viewing.
 
+StormHub also exposes `stormhub.publishing.publish_authenticated_item` as a
+domain-neutral publication boundary. A caller supplies its own Item identity,
+geometry, temporal extent, searchable properties, relationships, and
+checksum-pinned assets. StormHub verifies local bytes and writes a portable
+STAC tree without importing or reinterpreting the caller's domain contract.
+
 ### FAIR Data Sharing and Publishing
 StormHub facilitates FAIR data principles by enabling:
 - Exporting catalogs as **zip files** for easy sharing and archiving.
