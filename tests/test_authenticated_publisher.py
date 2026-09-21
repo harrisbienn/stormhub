@@ -6,7 +6,8 @@ import hashlib
 import os
 import subprocess
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
 from pathlib import Path
 
 import pystac
@@ -19,6 +20,8 @@ from stormhub.publishing import (
     publish_authenticated_item,
 )
 from stormhub.utils import sha256_from_checksum
+
+UTC = timezone.utc
 
 
 @pytest.mark.parametrize("field", ["item_id", "collection_id"])
