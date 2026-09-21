@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +19,99 @@ from stormhub.publishing import (
     publish_authenticated_item,
 )
 from stormhub.utils import sha256_from_checksum
+
+
+@pytest.mark.parametrize("field", ["item_id", "collection_id"])
+@pytest.mark.parametrize("value", [
+    "C:outside", "C:\\outside", "file:stream", "//server/share", "\\rooted", "../outside",
+    "CON", "con.txt", "CON .txt", "CONIN$", "NUL", "AUX.json", "PRN", "COM1", "LPT9.txt", "COM\u00b9", "LPT\u00b2.ext",
+    "name.", "name ", " name", "a\x00b", "a\nb", 'bad"name', "a*b", "a?b", "a|b", "a<b", "a>b",
+])
+def test_publication_identifiers_reject_unsafe_portable_names(tmp_path, field, value):
+    """Reject Windows syntax on every host before attempting publication."""
+    publication, _ = _publication(tmp_path)
+    with pytest.raises(ValueError, match="safe path component"):
+        replace(publication, **{field: value})
+
+
+@pytest.mark.parametrize("value", ["response-123", "model_v2.1", "Model name", "bassin-\u00e9", "COM10"])
+def test_publication_identifiers_preserve_safe_names(tmp_path, value):
+    """Keep ordinary identifiers, including Unicode and internal spaces."""
+    publication, _ = _publication(tmp_path)
+    updated = replace(publication, item_id=value, collection_id=value)
+    assert updated.item_id == value
+    assert updated.collection_id == value
+
+
+def _directory_link(link: Path, target: Path) -> None:
+    """Use a Windows junction or POSIX symlink only inside disposable fixtures."""
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                       check=True, capture_output=True)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+@pytest.mark.parametrize("boundary", ["collection", "item"])
+def test_generated_destinations_reject_directory_link_escape(tmp_path, boundary):
+    """Reject existing junctions/symlinks before writing any catalog content."""
+    catalog = _catalog(tmp_path)
+    publication, manifest = _publication(tmp_path)
+    catalog_path = Path(catalog.get_self_href())
+    before = catalog_path.read_bytes()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = catalog_path.parent / publication.collection_id
+    if boundary == "item":
+        link.mkdir()
+        link = link / publication.item_id
+    _directory_link(link, outside)
+    with pytest.raises(ValueError, match="catalog directory"):
+        publish_authenticated_item(catalog, publication, reference_path=manifest)
+    assert list(outside.iterdir()) == []
+    assert catalog_path.read_bytes() == before
+
+
+def test_existing_collection_cannot_redirect_writes_outside_catalog(tmp_path):
+    """A cached collection's self href is a write destination too."""
+    catalog = _catalog(tmp_path)
+    publication, manifest = _publication(tmp_path)
+    publish_authenticated_item(catalog, publication, reference_path=manifest)
+    collection = catalog.get_child(publication.collection_id)
+    outside = tmp_path / "outside-collection.json"
+    collection.set_self_href(str(outside))
+    before = Path(catalog.get_self_href()).read_bytes()
+    with pytest.raises(ValueError, match="catalog directory"):
+        publish_authenticated_item(catalog, replace(publication, item_id="second"), reference_path=manifest)
+    assert not outside.exists()
+    assert Path(catalog.get_self_href()).read_bytes() == before
+
+
+def test_explicit_item_path_remains_a_trusted_override(tmp_path):
+    """An explicit caller-owned output path retains the existing API contract."""
+    catalog = _catalog(tmp_path)
+    publication, manifest = _publication(tmp_path)
+    destination = tmp_path / "trusted-export" / "item.json"
+    publish_authenticated_item(catalog, publication, reference_path=manifest, item_path=destination)
+    assert pystac.Item.from_file(str(destination)).id == publication.item_id
+
+
+def test_catalog_layout_cannot_replace_validated_destinations(tmp_path):
+    """Inherited PySTAC strategies cannot redirect this publisher's writes."""
+    class OutsideLayout(pystac.layout.BestPracticesLayoutStrategy):
+        def get_href(self, stac_object, parent_dir, is_root=False):
+            return str(tmp_path / "outside.json")
+
+    catalog = _catalog(tmp_path)
+    catalog.strategy = OutsideLayout()
+    publication, manifest = _publication(tmp_path)
+    item = publish_authenticated_item(catalog, publication, reference_path=manifest)
+    assert Path(item.get_self_href()).is_relative_to(tmp_path / "catalog")
+    assert not (tmp_path / "outside.json").exists()
+    saved = pystac.Item.from_file(item.get_self_href())
+    for asset in saved.assets.values():
+        assert Path(asset.get_absolute_href()).is_file()
+    assert saved.get_parent().id == publication.collection_id
 
 
 def _asset(path: Path, *, key: str, metadata: dict[str, object] | None = None) -> AuthenticatedAsset:
