@@ -1,131 +1,118 @@
-"""Create a simple HTTP server for viewing local STAC objects."""
+"""Preview a trusted local STAC directory; this is not a deployment server."""
 
-import os
-import sys
+import argparse
+import html
+import io
+import ipaddress
 import webbrowser
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from socketserver import ThreadingMixIn
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import quote, unquote
 
 
 class CORSRequestHandler(SimpleHTTPRequestHandler):
-    """Handle CORS requests."""
+    """Serve files confined to a trusted directory, including resolved links."""
 
     def end_headers(self):
-        """Add CORS headers to the response."""
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "x-api-key, Content-Type")
-        SimpleHTTPRequestHandler.end_headers(self)
+        """Allow the hosted STAC browser to read this local preview."""
+        self.send_header("Access-Control-Allow-Origin", "https://radiantearth.github.io")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
+    def _within_root(self, path: Path) -> bool:
+        try:
+            return path.resolve().is_relative_to(Path(self.directory).resolve())
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    def send_head(self):
+        """Reject external symlinks/junctions before the standard handler opens them."""
+        path = Path(self.translate_path(self.path))
+        if not self._within_root(path):
+            self.send_error(403, "Path is outside the preview directory")
+            return None
+        # The base handler also opens directory indexes; check those separately.
+        if path.is_dir():
+            for name in ("index.html", "index.htm"):
+                candidate = path / name
+                if not self._within_root(candidate):
+                    self.send_error(403, "Index is outside the preview directory")
+                    return None
+                if candidate.is_file():
+                    break
+        return super().send_head()
 
     def list_directory(self, path):
-        """List the contents of a directory."""
+        """Escape display text and encode URLs; omit links outside the root."""
         try:
-            list = os.listdir(path)
+            entries = sorted(Path(path).iterdir(), key=lambda entry: entry.name.lower())
         except OSError:
-            self.send_error(404, "No permission to list directory")
+            self.send_error(404, "Cannot list directory")
             return None
-        list.sort(key=lambda a: a.lower())
-        r = []
-        displaypath = self.path
-        r.append(f"<!DOCTYPE html><html><head><title>Directory listing for {displaypath}</title></head>")
-        r.append(
-            '<div style="text-align: right; margin: 20px;"><button style="background-color: #2986cc; color: \
-             white; padding: 10px 20px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer;" \
-             onclick="stopServer()">🛑 Stop Server</button></div>'
-        )
-        r.append(
-            f'<h2><a href="https://radiantearth.github.io/stac-browser/#/external/http://localhost:{self.server.server_port}/catalog.json" target="_blank">STAC Viewer</a></h2>'
-        )
-        r.append(f"<body><h4>Local directory listing for {displaypath}</h4>")
-
-        r.append(
-            """
-            <script>
-                function stopServer() {
-                    fetch('/shutdown', { method: 'POST' })
-                    .then(response => response.text())
-                    .then(data => {
-                        alert(data);
-                        window.close();
-                    })
-                    .catch(error => alert('Failed to stop server'));
-                }
-            </script>
-        """
-        )
-
-        r.append("<hr><ul>")
-        for name in list:
-            fullname = os.path.join(path, name)
-            displayname = name
-            linkname = name
-            if os.path.isdir(fullname):
-                displayname = name + "/"
-                linkname = name + "/"
-            r.append(f'<li><a href="{linkname}">{displayname}</a></li>')
-        r.append("</ul><hr>")
-        r.append("</body></html>")
-        encoded = "\n".join(r).encode("utf-8", "surrogateescape")
+        display = html.escape(unquote(self.path), quote=True)
+        rows = [
+            f"<!doctype html><html><head><meta charset='utf-8'><title>{display}</title></head>",
+            f"<body><h1>Local preview: {display}</h1><ul>",
+        ]
+        for entry in entries:
+            if not self._within_root(entry):
+                continue
+            name = entry.name + ("/" if entry.is_dir() else "")
+            href = quote(name, safe="/", errors="surrogatepass")
+            rows.append(f'<li><a href="{href}">{html.escape(name, quote=True)}</a></li>')
+        rows.append("</ul><p>Stop the server with Ctrl+C in its terminal.</p></body></html>")
+        body = "\n".join(rows).encode("utf-8", "surrogateescape")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(encoded)
-        return None
+        return io.BytesIO(body)
 
-    def do_POST(self):
-        """Handle POST requests."""
-        if self.path == "/shutdown":
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"Server is shutting down...")
-            print("Shutting down the server...")
-
-            def shutdown():
-                self.server.shutdown()
-
-            import threading
-
-            threading.Thread(target=shutdown).start()
+    def do_OPTIONS(self):
+        """Advertise read-only preview methods."""
+        self.send_response(204)
+        self.send_header("Allow", "GET, HEAD, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    """Handle requests in a separate thread."""
+class ThreadedHTTPServer(ThreadingHTTPServer):
+    """Retain the existing server import with standard daemon request threads."""
 
 
 def main(mkdir: bool = True):
-    """Start a simple HTTP server."""
-    if len(sys.argv) < 2:
-        print("Usage: python server.py <directory_to_serve> [host] [port]")
-        sys.exit(1)
-
-    local_dir = sys.argv[1]
-    if not os.path.isdir(local_dir):
-        if mkdir:
-            os.makedirs(local_dir)
-        else:
-            print(
-                f"The specified directory '{local_dir}' does not exist or is not a directory., set mkdir=True to create it."
-            )
-            sys.exit(1)
-
-    os.chdir(local_dir)
-
-    host = sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0"
-    port = int(sys.argv[3]) if len(sys.argv) > 3 else 5000
-
-    print(f"Serving '{local_dir}' on {host}:{port}")
-    httpd = ThreadedHTTPServer((host, port), CORSRequestHandler)
-
-    url = f"http://localhost:{port}/"
-    webbrowser.open(url)
-
+    """Start a loopback preview; require explicit consent for network exposure."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("host", nargs="?", default="127.0.0.1")
+    parser.add_argument("port", nargs="?", type=int, default=5000)
+    parser.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="Allow a non-loopback bind on a trusted network (no authentication)",
+    )
+    args = parser.parse_args()
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down the server.")
-        httpd.server_close()
+        loopback = ipaddress.ip_address(args.host).is_loopback
+    except ValueError:
+        loopback = args.host.lower() == "localhost"
+    if not loopback and not args.allow_network:
+        parser.error("Non-loopback hosts require --allow-network; this preview has no authentication")
+    root = args.directory.resolve()
+    if mkdir:
+        root.mkdir(parents=True, exist_ok=True)
+    if not root.is_dir():
+        parser.error("The preview directory must exist and be a directory")
+    handler = partial(CORSRequestHandler, directory=str(root))
+    with ThreadedHTTPServer((args.host, args.port), handler) as server:
+        print(f"Serving '{root}' on {args.host}:{server.server_port}; stop with Ctrl+C")
+        webbrowser.open(f"http://127.0.0.1:{server.server_port}/")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

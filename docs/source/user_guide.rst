@@ -2,7 +2,7 @@
 Getting Started
 ################
 
-This section provides a high level overview for using stormhub for production, including starting the stormhub server and creating objects.
+This section provides a high level overview for using stormhub for production, including creating objects and previewing local catalogs.
 
 Installation
 ------------
@@ -33,6 +33,14 @@ production, but is useful for visualizing and exploring the data.
    .. code-block:: bash
 
       stormhub-server <path-to-local-dir>
+
+The preview binds to ``127.0.0.1`` by default. Stop it with Ctrl+C; HTTP shutdown
+and write operations are unavailable. Non-loopback binding requires an explicit
+host and ``--allow-network``. Use only trusted content and a directory that other
+users cannot modify. Symlinks/junctions resolving outside the root are denied.
+This unauthenticated development preview is not a cloud model-library service;
+CORS does not provide authentication or authorization.
+
 
 
 Local file server is useful for interacting with STAC browser for viewing the data locally. This is not required....

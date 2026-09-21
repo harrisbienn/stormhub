@@ -37,7 +37,21 @@ The catalog stores USGS gage items with:
 ---
 
 ### STAC Server
-StormHub includes an HTTP server that serves STAC items locally, allowing users to visualize and explore catalogs for both storms and stream gages. The server integrates with [Radiant Earth's STAC Browser](https://github.com/radiantearth/stac-browser) for seamless data viewing.
+Use `stormhub-server <directory>` to preview trusted local catalogs at
+`http://127.0.0.1:5000`. Stop it with **Ctrl+C**. There is no HTTP shutdown or write
+endpoint. Display names are HTML-escaped and links are URL-encoded. Resolved file,
+directory, and index paths must remain inside the selected root; external symlinks
+and Windows junctions are denied and omitted from listings. Internal links are
+allowed. Keep the root and its ancestors writable only by trusted operators: this
+check does not protect against a concurrent filesystem writer swapping links.
+
+An explicit non-loopback bind requires both a host and `--allow-network`, for
+example `stormhub-server <directory> 192.0.2.10 5000 --allow-network`. This exposes
+an **unauthenticated** preview to that network. The preview is not a cloud model
+library endpoint. A staff-only library needs its own authenticated, authorized,
+read-only service behind private ingress and TLS. CORS permits the hosted
+[Radiant Earth STAC Browser](https://radiantearth.github.io/stac-browser/); CORS is
+browser policy, not access control. Serve only content you trust, including HTML.
 
 StormHub also exposes `stormhub.publishing.publish_authenticated_item` as a
 domain-neutral publication boundary. A caller supplies its own Item identity,
@@ -91,3 +105,54 @@ This project builds on the work of Daniel Wright's [RainyDay2](https://her.cee.w
 
 ## License
 StormHub is licensed under the MIT License. See [LICENSE](LICENSE) for more information.
+
+## CI and releases
+
+`CI` runs on every pull request and main/dev push, including dependency-only and
+workflow-only changes. It checks Python 3.10?3.12 on Linux and 3.12 on Windows.
+The portable subset covers publication, scenario contracts, preview confinement,
+and HTTP-client credential/redirect/proxy/streaming behavior. Only the preview
+tests use sockets, on ephemeral loopback ports; no test calls an external service.
+Package installation still needs the package index. Native DSS/GIS/HEC and large
+model qualification remain separate gates.
+
+Reproduce the portable check in a clean environment:
+
+```bash
+python -m pip install pip==26.2.1 pytest==9.1.1 packaging==26.3
+python -m pip install --no-deps .
+python .github/scripts/install_ci_dependencies.py
+python -I -m pytest tests/test_authenticated_publisher.py tests/test_preview_server.py tests/test_requests_security.py tests/test_scenario_contract.py tests/test_scenario_publisher.py tests/test_scenario_response.py tests/test_scenario_stac.py
+```
+
+The CI dependency selector reads runtime pins from the installed package metadata;
+it is not a substitute for a complete scientific environment installation.
+Requests is pinned consistently to 2.34.2 in package, Conda, and documentation
+requirements. Its upstream fixes cover
+[netrc credential leakage](https://github.com/psf/requests/security/advisories/GHSA-9hjg-9r4m-mvj7)
+and [archive extraction](https://github.com/psf/requests/security/advisories/GHSA-gc5v-m9x4-r6x2).
+The Requests regression fixtures contain dummy credentials and use a fake HTTP
+adapter, not a live download. Broader native dependency qualification is separate.
+
+`Release` is now manual and accepts only `main`; leave `publish` false for a
+validation-only run. It reruns the same CI workflow for the selected revision and
+publishes only that run's distribution artifact after all matrix checks pass.
+Build jobs have read-only repository tokens and no persisted checkout credentials.
+Separate publication jobs use the `pypi` environment; PyPI uses short-lived OIDC,
+and only the GitHub release job can write repository releases. PR jobs cannot
+reach either publication job. Actions are commit-pinned and Dependabot proposes
+reviewed updates.
+
+Before the first release, an administrator must configure the PyPI trusted publisher
+for this repository, `release.yaml`, and environment `pypi`; restrict that environment
+to `main` with reviewer approval; and protect `main` with the CI unit matrix and
+`Build tested distribution` checks. Configure the publisher before removing the
+obsolete `PYPI_TOKEN` secret; the new workflow does not consume it. These settings
+are not established by committing workflow YAML. The 2026-09-21 review found main
+unprotected; no package was released as part of validation. See
+[PyPI's setup instructions](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
+
+Ruff checks package, test, and CI-helper docstrings and critical syntax errors.
+Formatting checks cover the rewritten preview and new security tests/helpers;
+pre-existing formatting drift in 12 files and a notebook docstring violation are
+not mixed into this security patch.
