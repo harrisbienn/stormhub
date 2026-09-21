@@ -45,6 +45,13 @@ geometry, temporal extent, searchable properties, relationships, and
 checksum-pinned assets. StormHub verifies local bytes and writes a portable
 STAC tree without importing or reinterpreting the caller's domain contract.
 
+Publication IDs must be single portable filename components: Windows device names,
+drive/stream syntax, control characters, and leading/trailing whitespace or trailing
+dots are rejected. Generated destinations and existing Collection write paths must
+resolve inside the catalog directory, including through symlinks or junctions.
+Keep that directory writable only by trusted publishers. The optional `item_path`
+is an explicit trusted-caller override; do not expose it to library readers.
+
 ### FAIR Data Sharing and Publishing
 StormHub facilitates FAIR data principles by enabling:
 - Exporting catalogs as **zip files** for easy sharing and archiving.

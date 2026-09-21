@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -32,9 +32,25 @@ def _required_text(value: str, name: str) -> str:
 
 def _path_component(value: str, name: str) -> str:
     normalized = _required_text(value, name)
-    if normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
+    # Apply Windows rules on every host so a published tree stays portable.
+    # Reject normalization aliases rather than silently changing Item identities.
+    if (
+        normalized != value
+        or normalized in {".", ".."}
+        or normalized.endswith(".")
+        or any(character in '<>:"/\\|?*' or ord(character) < 32 for character in normalized)
+        or PureWindowsPath(normalized).is_reserved()
+    ):
         raise ValueError(f"{name} must be one safe path component")
     return normalized
+
+
+def _confined_path(path: Path, catalog_dir: Path) -> Path:
+    """Resolve existing symlinks/junctions and constrain publication writes."""
+    resolved = path.resolve()
+    if not resolved.is_relative_to(catalog_dir):
+        raise ValueError("Publication destination must remain inside the catalog directory")
+    return resolved
 
 
 def _is_remote_href(href: str) -> bool:
@@ -292,21 +308,33 @@ def publish_authenticated_item(
     item_path: str | Path | None = None,
     verify_files: bool = True,
 ) -> pystac.Item:
-    """Append one authenticated, caller-owned Item to a saved local STAC Catalog."""
+    """Append one authenticated, caller-owned Item to a saved local STAC Catalog.
+
+    Generated Item and Collection paths stay within the resolved catalog directory,
+    including through existing symlinks/junctions. An explicit ``item_path`` is a
+    trusted-caller override and may be outside that directory. Do not pass a reader's
+    input through that override. The catalog tree must not be writable by untrusted
+    processes; path checks do not prevent concurrent filesystem substitution.
+    """
     catalog_href = catalog.get_self_href()
     if catalog_href is None or _is_remote_href(catalog_href):
         raise ValueError("Publishing requires a saved local STAC Catalog")
     catalog_dir = Path(catalog_href).resolve().parent
-    collection_dir = catalog_dir / publication.collection_id
-    collection_path = collection_dir / "collection.json"
+    collection_dir = _confined_path(catalog_dir / publication.collection_id, catalog_dir)
+    collection_path = _confined_path(collection_dir / "collection.json", catalog_dir)
     output = (
         Path(item_path).resolve()
         if item_path is not None
-        else collection_dir / publication.item_id / f"{publication.item_id}.json"
+        else _confined_path(collection_dir / publication.item_id / f"{publication.item_id}.json", catalog_dir)
     )
     collection = catalog.get_child(publication.collection_id)
     if collection is not None and not isinstance(collection, pystac.Collection):
         raise ValueError(f"Catalog child {publication.collection_id!r} is not a STAC Collection")
+    if collection is not None:
+        collection_href = collection.get_self_href()
+        if collection_href is None or _is_remote_href(collection_href):
+            raise ValueError("Collection must be saved locally inside the catalog directory")
+        _confined_path(Path(collection_href), catalog_dir)
     existing = collection.get_item(publication.item_id, recursive=False) if collection is not None else None
     if existing is not None or output.exists():
         raise ValueError(f"Authenticated Item {publication.item_id!r} is already published")
@@ -318,9 +346,12 @@ def publish_authenticated_item(
     )
     if collection is None:
         collection = _new_collection(publication, item, collection_path)
-        catalog.add_child(collection)
+        collection.set_parent(catalog)
+        catalog.add_child(collection, set_parent=False)
     _update_item_assets(collection, item)
-    collection.add_item(item)
+    # PySTAC's inherited layout strategy can otherwise replace the validated hrefs.
+    item.set_parent(collection)
+    collection.add_item(item, set_parent=False)
     item.save_object(include_self_link=False)
     collection.update_extent_from_items()
     collection.save_object(include_self_link=False)
