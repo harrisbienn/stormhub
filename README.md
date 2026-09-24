@@ -90,6 +90,12 @@ pip install -e .
 ## Usage
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
 
+For the LWI Region 3 geometry revision, follow the
+[catalog rerun runbook](docs/source/lwi_geometry_rerun.rst). It records the
+2026-09-24 archive verification and the fresh search, DSS validation, and
+FloodForecast handoff steps. Build the replacement in a new catalog directory;
+existing catalog paths remain historical references.
+
 ## Sources and References
 - **AORC Dataset** - 1km hourly gridded precipitation data, available through NOAA.
 - **RainyDay2** - Stochastic Storm Transposition framework by the [Hydroclimate Extremes Research Group](https://her.cee.wisc.edu/)

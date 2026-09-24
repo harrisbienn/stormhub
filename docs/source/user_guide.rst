@@ -157,6 +157,11 @@ Start with one ``item_ids`` value as a smoke test before processing a full
 collection. A target product should only be treated as model-ready when its
 spatial and DSS record-count validations both report ``passed``.
 
+For a changed watershed or transposition region, see
+:doc:`lwi_geometry_rerun` before reusing a catalog or exporting DSS files.
+Geometry changes require new search statistics and rankings. The DSS exporter
+replaces selected output files; it does not automatically skip existing exports.
+
 Viewing Results
 ----------------
 Example Collection created for the indian-creek example data.
