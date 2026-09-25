@@ -82,7 +82,7 @@ def _validate_settings(settings: CatalogSettings) -> None:
 
 
 def load_catalog_settings(path: str | Path) -> CatalogSettings:
-    """Read the shared JSON settings and validate domain identities and checksums."""
+    """Read JSON settings and validate domain identities and checksums."""
     settings = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(settings, dict):
         raise ValueError(f"Catalog settings must be a JSON object: {path}")
@@ -182,7 +182,7 @@ def prepare_catalog_inputs(
     _check_mode(existing)
     _validate_settings(settings)
     _component(config_filename, "config_filename")
-    if config_filename in ("catalog.json", "params-config.json", "inputs", "hydro_domains"):
+    if config_filename in ("catalog.json", "creation-settings.json", "params-config.json", "inputs", "hydro_domains"):
         raise ValueError("config_filename conflicts with a catalog-managed path")
     root = Path(catalog_root).resolve()
     directory = root / settings["catalog_id"]
@@ -192,7 +192,7 @@ def prepare_catalog_inputs(
         raise FileExistsError(f"Catalog directory exists: {directory}; select existing='reuse' or a new catalog ID")
     domains = prepare_catalog_domains(settings, repository_root)
     runtime = deepcopy(settings)
-    payloads = {"params-config.json": _json_bytes(settings)}
+    payloads = {"creation-settings.json": _json_bytes(settings)}
     for key, domain in domains.items():
         name = f"inputs/{settings[key]['id']}.geojson"
         feature = {"type": "Feature", "properties": {}, "geometry": mapping(domain.geometry)}
@@ -240,7 +240,7 @@ def create_prepared_catalog(
     if directory.resolve() != directory or config_path.resolve() != config_path:
         raise ValueError("Prepared catalog paths must not traverse symlinks or junctions")
     config = load_catalog_settings(config_path)
-    settings = load_catalog_settings(directory / "params-config.json")
+    settings = load_catalog_settings(directory / "creation-settings.json")
     if directory.name != settings["catalog_id"]:
         raise ValueError("Prepared catalog directory does not match catalog_id")
     expected_config = deepcopy(settings)
@@ -296,7 +296,7 @@ def create_prepared_catalog(
             raise ValueError("Existing catalog has an invalid transposition-region Item")
         logger.info("Loading existing catalog without changes: %s", catalog_path)
         return catalog
-    allowed = {"inputs", "params-config.json", config_path.name, "hydro_domains"}
+    allowed = {"inputs", "creation-settings.json", config_path.name, "hydro_domains"}
     if any(path.name not in allowed for path in directory.iterdir()):
         raise ValueError("Incomplete catalog contains unexpected products; inspect it instead of recreating it")
     domain_dir = directory / "hydro_domains"

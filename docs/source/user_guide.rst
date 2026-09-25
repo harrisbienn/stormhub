@@ -132,7 +132,7 @@ Catalog creation from prepared domains
 ``notebooks/catalog_creation.ipynb`` delegates its reusable work to
 ``stormhub.met.catalog_setup``:
 
-* ``load_catalog_settings`` validates the shared JSON configuration.
+* ``load_catalog_settings`` validates a creation configuration or saved snapshot.
 * ``prepare_catalog_domains`` verifies source hashes and prepares WGS84 polygons.
   Each ``PreparedDomain.summary()`` supplies notebook inspection metadata.
 * ``plot_catalog_domains`` returns Matplotlib axes for further customization.
@@ -141,9 +141,31 @@ Catalog creation from prepared domains
 * ``create_prepared_catalog`` calls the existing StormHub catalog builder or
   loads an already completed matching catalog without writing it.
 
+There are two deliberately separate configuration roles:
+
+* ``configs/params-config.json`` is the editable input for creating a catalog.
+* ``catalogs/<catalog-id>/creation-settings.json`` is the frozen record of that
+  catalog's creation settings and the authority for its population defaults.
+  Do not edit it to change an existing generation.
+
+The creation notebook writes the snapshot. The population notebook selects
+``CATALOG_ID`` explicitly and reads that catalog's snapshot directly, so changing
+the editable configuration for a future catalog does not affect an existing one.
+The generated runtime config (``catalog-config.json``, or ``lwi-r3-config.json``
+in the LWI notebook) separately binds local prepared-domain paths and checksums;
+keep it as well.
+
+Catalogs prepared before this rename have a catalog-local ``params-config.json``.
+For those preparation workspaces, rename that snapshot to
+``creation-settings.json`` without changing its bytes, and verify its SHA-256
+before and after. Refuse a conflicting destination rather than overwrite it.
+Do not rename the editable file under ``configs/`` or modify preserved historical
+catalogs/archives. The new helpers require the explicit snapshot name and do not
+fall back to the editable configuration when it is missing.
+
 Set ``EXISTING = "error"`` (the default) to refuse an existing destination.
 Set ``EXISTING = "reuse"`` to rerun the notebook against the same generation.
-Reuse requires matching saved settings/configuration, prepared geometry bytes,
+Creation reuse requires matching editable and saved settings/configuration, prepared geometry bytes,
 catalog identity, and local domain Items. It does not overwrite changed inputs.
 An interrupted AORC base build can be retried from complete verified inputs if
 the workspace contains only preparation and expected base-domain files.

@@ -5,8 +5,9 @@ Preparation recorded on 2026-09-24. Generation is tracked by
 `StormHub #15 <https://github.com/harrisbienn/stormhub/issues/15>`_; adoption is
 tracked by
 `FloodForecast #105 <https://github.com/harrisbienn/floodforecast/issues/105>`_.
-The operator supplied the replacement inputs on 2026-09-25. Both notebooks now
-read ``configs/params-config.json`` and target ``lwi-region3-geometry-v2``.
+The operator supplied the replacement inputs on 2026-09-25. Creation reads
+``configs/params-config.json``; population selects ``lwi-region3-geometry-v2``
+and reads its frozen ``creation-settings.json`` snapshot.
 The replacement base catalog is now present locally; its eight files passed
 a read-only reuse check during the notebook refactor. No storm population or
 DSS generation was run as part of the wiring/refactor checks.
@@ -95,7 +96,8 @@ matched. FloodForecast's clean component verification passed before branching.
 2. Verify the paths, hashes, and new watershed/region IDs in
    ``configs/params-config.json``. The creation notebook resolves those paths
    against the repository root and prepares the single-polygon inputs.
-3. Both notebooks derive ``CATALOG_ID`` from the shared configuration.
+3. Creation derives the catalog ID from its editable configuration. Population
+   selects ``CATALOG_ID`` independently and verifies the saved snapshot's ID.
    ``lwi-region3-geometry-v2`` is configured. Keep ``EXISTING="error"`` for
    fresh creation, or explicitly select ``"reuse"`` to verify and reopen this
    same generation. Conflicting inputs require a new catalog ID.
@@ -114,7 +116,9 @@ The resulting layout should keep independent generations::
 Freeze settings and rerun discovery
 ----------------------------------
 
-``configs/params-config.json`` supplies both notebooks with these settings.
+``configs/params-config.json`` supplies creation with these settings; its frozen
+``catalogs/lwi-region3-geometry-v2/creation-settings.json`` snapshot supplies
+population defaults.
 They are inherited preparation defaults, not a new engineering approval:
 
 .. list-table::
@@ -141,10 +145,11 @@ They are inherited preparation defaults, not a new engineering approval:
      - ``use_valid_region=True``
 
 The previous 24-hour config / 6-hour notebook discrepancy is resolved by retaining
-the population notebook's 6-hour step in the shared config. Search methodology
+the population notebook's 6-hour step in the creation config. Search methodology
 and export choices remain subject to the pre-search review. Creation freezes a
-copy of the shared settings in the new catalog; population refuses a differing
-configuration. Select 24/48/72 hours through ``STORM_DURATION_HOURS`` in the
+``creation-settings.json`` in the new catalog. Population reads that snapshot
+without consulting the editable config, which may now describe another catalog.
+Select 24/48/72 hours through ``STORM_DURATION_HOURS`` in the
 population notebook without changing the frozen config between durations.
 Record all geometry/config hashes and export options in generation evidence.
 ``use_valid_region`` affects source DSS
@@ -268,3 +273,16 @@ and diff whitespace checks passed. A read-only reuse of the current local
 base catalog verified all eight files' hashes and modification times unchanged.
 No AORC discovery, DSS regeneration, replacement, or deletion of a catalog was
 performed. The component-lock and HTML-build limitations above still apply.
+
+Snapshot naming and authority
+-----------------------------
+
+The catalog-local ``params-config.json`` snapshot was renamed to
+``creation-settings.json`` to distinguish it from the editable file under
+``configs/``. The existing LWI v2 snapshot was migrated without changing its
+contents; its SHA-256 remains
+``335ad1cd7768f9b127ce7b9b7fef6789b3e48be85d3e226d27f55539e4bebf2a``.
+Keep ``configs/params-config.json`` for new creation and keep the catalog snapshot
+for existing-generation provenance and population. The runtime
+``lwi-r3-config.json`` still binds prepared geometry paths/checksums. Historical
+``lwi-region3/`` and its ZIP are unchanged by this migration.

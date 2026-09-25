@@ -150,6 +150,8 @@ def test_unsafe_identity(settings, tmp_path, catalog_id):
 def test_reuse_is_read_only_and_errors_are_actionable(settings, tmp_path):
     """Reuse exact inputs without rewriting them, and refuse default overwrite."""
     config_path = prepare(settings, tmp_path)
+    assert json.loads((config_path.parent / "creation-settings.json").read_text()) == settings
+    assert not (config_path.parent / "params-config.json").exists()
     before = snapshot(config_path.parent)
     with pytest.raises(FileExistsError, match="reuse"):
         prepare(settings, tmp_path)
@@ -162,7 +164,7 @@ def test_reuse_is_read_only_and_errors_are_actionable(settings, tmp_path):
     assert snapshot(config_path.parent) == before
 
 
-@pytest.mark.parametrize("filename", ["params-config.json", "inputs/watershed-v2.geojson"])
+@pytest.mark.parametrize("filename", ["creation-settings.json", "inputs/watershed-v2.geojson"])
 def test_missing_inputs_are_not_silently_repaired(settings, tmp_path, filename):
     """Keep partial preparation explicit instead of filling uncertain state."""
     config_path = prepare(settings, tmp_path)
@@ -265,3 +267,30 @@ def test_plot_returns_customizable_axes(settings, tmp_path):
         assert ax.get_xlabel() == "Longitude"
     finally:
         plt.close(ax.figure)
+
+
+def test_population_uses_selected_catalog_snapshot(settings, tmp_path, monkeypatch):
+    """Keep population independent of edits to the next catalog's creation config."""
+    notebook_path = Path(__file__).resolve().parents[1] / "notebooks/catalog_population.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    settings["catalog_id"] = "lwi-region3-geometry-v2"
+    config_path = prepare(settings, tmp_path)
+    (tmp_path / "pyproject.toml").write_text("")
+    editable = tmp_path / "configs/params-config.json"
+    editable.parent.mkdir()
+    editable.write_text('{"catalog_id":"a-different-generation","params":{"check_every_n_hours":24}}')
+    monkeypatch.chdir(tmp_path)
+    namespace = {}
+    setup_cell = "".join(notebook["cells"][1]["source"])
+    exec(compile(setup_cell, str(notebook_path), "exec"), namespace)
+    assert namespace["settings"] == settings
+    assert namespace["run_settings"]["check_every_n_hours"] == 6
+    editable.unlink()
+    exec(compile(setup_cell, str(notebook_path), "exec"), namespace)
+    assert namespace["settings"] == settings
+    snapshot_path = config_path.parent / "creation-settings.json"
+    wrong_settings = deepcopy(settings)
+    wrong_settings["catalog_id"] = "wrong-catalog"
+    snapshot_path.write_text(json.dumps(wrong_settings))
+    with pytest.raises(ValueError, match="does not belong"):
+        exec(compile(setup_cell, str(notebook_path), "exec"), namespace)
