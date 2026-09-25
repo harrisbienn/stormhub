@@ -157,18 +157,30 @@ coverage and must also be reviewed, particularly for the full HMS forcing
 domain. The search watershed, HMS forcing domain, and RAS coverage domain are
 separate concepts; a 5-km target buffer is not proof of model coverage.
 
-For each duration, set ``STORM_DURATION_HOURS`` and call ``new_collection``
-through the population notebook with ``SMOKE_TEST=False`` and
-``CREATE_NEW_ITEMS=True``. Set ``RUN_DSS_EXPORT=False`` during discovery so a
-full export does not start before the new population is reviewed (this is now
-the notebook default, with ``DSS_ITEM_IDS=["1"]`` for the smoke export). The API
-keyword is ``storm_duration``. Preserve the new ``storm-stats.csv``,
+For each fresh duration, run ``stormhub populate`` or the population notebook's
+shared ``populate_catalog`` workflow with ``SMOKE_TEST=False``. Set
+``RUN_DSS_EXPORT=False`` during notebook discovery so export does not start
+before the new population is reviewed. The CLI keeps export separate:
+
+.. code-block:: powershell
+
+   stormhub populate catalogs/lwi-region3-geometry-v2 --duration 24 --dry-run
+   stormhub populate catalogs/lwi-region3-geometry-v2 --duration 24
+
+The local 72-hour collection already contains smoke-search Items and DSS.
+Fresh population deliberately refuses that existing workspace. Prepare a new
+catalog generation for its full search; do not silently expand or overwrite the
+smoke results. The CLI reads ``creation-settings.json`` and records search scope
+and domain hashes in ``<duration>hr-events/population-settings.json``.
+Preserve the new ``storm-stats.csv``,
 ``ranked-storms.csv``, Items, and settings; check temporal search completeness
 before accepting the rankings.
 
 Do not reuse historical statistics, ranked tables, or numeric Item directories.
-``resume_collection`` only continues a search with the same geometry and
-settings. ``workflows/rebuild_ranked_items.py`` reranks existing statistics and
+``stormhub resume`` and the notebook's ``resume_catalog`` only continue a recorded
+full search with unchanged settings/domain hashes and partial statistics, before
+Items or DSS are created. They refuse smoke searches and older unrecorded runs.
+``workflows/rebuild_ranked_items.py`` reranks existing statistics and
 cannot perform a geometry rerun. The notebook's resume cell is an alternative
 for an interrupted search, disabled by default with ``RUN_RESUME=False``;
 it is not a required second full-search step. If a resumed
@@ -187,12 +199,24 @@ After completing and reviewing a duration's population:
    Inspect source/target placement, SHG-cell offsets, target footprint, hourly
    coverage, and units. Repeat this smoke for every duration.
 3. Export the remaining Items. ``DSS_ITEM_IDS=None`` selects the whole
-   collection and regenerates the smoke Item too. To retain the successful
-   smoke bytes, provide an explicit list of only unexported IDs instead.
+   collection. The shared workflow now refuses existing selected outputs unless
+   ``OVERWRITE_DSS=True`` (CLI: ``--overwrite``) is explicit. To retain the
+   successful smoke bytes, provide an explicit list of only unexported IDs.
 4. Check the returned ``failed_count``, per-item statuses, and validation
    reports. Retry only failed/unexported IDs when preserving successful assets.
    The exporter removes and replaces selected DSS outputs; it is not an
    automatic skip-existing/resume mechanism.
+
+The equivalent CLI smoke export is:
+
+.. code-block:: powershell
+
+   stormhub export-dss catalogs/lwi-region3-geometry-v2 --duration 24 --item-ids 1 --dry-run
+   stormhub export-dss catalogs/lwi-region3-geometry-v2 --duration 24 --item-ids 1
+
+Use ``--all-items`` only for an intentional whole-collection export. The three
+existing 72-hour smoke targets can be inspected with ``--duration 72 --item-ids
+1 2 3 --output-modes target --overwrite --dry-run`` without changing their bytes.
 
 Each duration must deliver its authoritative
 ``<duration>hr-events/dss/dss-manifest.csv``, source/target STAC assets and

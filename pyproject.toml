@@ -50,6 +50,7 @@ docs = ["sphinx", "numpydoc", "sphinx_rtd_theme", "sphinx_design", "pydata-sphin
 repository = "https://github.com/dewberry/stormhub"
 
 [project.scripts]
+stormhub = "stormhub.cli:main"
 stormhub-server = "stormhub.server.serve:main"
 
 [tool.pytest.ini_options]

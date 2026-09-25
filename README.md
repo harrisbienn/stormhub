@@ -102,6 +102,24 @@ pip install -e .
 ## Usage
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
 
+Catalog population is available through `stormhub populate`, `stormhub resume`,
+and `stormhub export-dss` (also `python -m stormhub`). After updating an editable
+checkout, run `python -m pip install --no-deps -e .` to register the new command.
+
+```powershell
+# Inspect the plan before starting a fresh duration search.
+stormhub populate catalogs/lwi-region3-geometry-v2 --duration 24 --dry-run
+# Export only selected Items after reviewing a completed collection.
+stormhub export-dss catalogs/lwi-region3-geometry-v2 --duration 24 --item-ids 1 --dry-run
+```
+
+Remove `--dry-run` to execute. These commands read the selected catalog's frozen
+`creation-settings.json`. Population refuses an existing duration directory;
+resume requires matching saved search provenance and no existing Items or DSS.
+Export requires `--item-ids ...` or `--all-items`, and refuses existing selected
+outputs unless `--overwrite` is explicit. See the
+[CLI workflow and limitations](docs/source/user_guide.rst#catalog-command-line-workflow).
+
 For the LWI Region 3 geometry revision, follow the
 [catalog rerun runbook](docs/source/lwi_geometry_rerun.rst). It records the
 2026-09-24 archive verification and the fresh search, DSS validation, and

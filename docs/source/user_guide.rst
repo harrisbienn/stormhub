@@ -77,6 +77,83 @@ Local file server is useful for interacting with STAC browser for viewing the da
 Workflows
 ---------
 
+Catalog command-line workflow
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``stormhub`` command and ``python -m stormhub`` expose the same population
+workflow as the notebook. Run them in the StormHub scientific environment. The
+existing ``stormhub-server`` command is unchanged. To register the new console
+command after updating an editable checkout:
+
+.. code-block:: powershell
+
+   python -m pip install --no-deps -e .
+   stormhub --help
+
+First create and review a base catalog using the creation notebook. Each command
+accepts its directory or ``catalog.json`` and requires an explicit ``--duration``
+in hours. Defaults come exclusively from that catalog's frozen
+``creation-settings.json``. The editable ``configs/params-config.json`` is not
+consulted. CLI options do not rewrite the frozen snapshot.
+
+.. code-block:: powershell
+
+   # Plan a fresh search (no writes or AORC requests).
+   stormhub populate catalogs/lwi-region3-geometry-v2 --duration 24 --dry-run
+   # Execute that search; DSS export is a separate operation.
+   stormhub populate catalogs/lwi-region3-geometry-v2 --duration 24
+   # Continue an interrupted full search, with an optional worker override.
+   stormhub resume catalogs/lwi-region3-geometry-v2 --duration 24 --workers 4
+   # Inspect and then export a selected smoke Item.
+   stormhub export-dss catalogs/lwi-region3-geometry-v2 --duration 24 --item-ids 1 --dry-run
+   stormhub export-dss catalogs/lwi-region3-geometry-v2 --duration 24 --item-ids 1
+
+Use ``--specific-date 2016-03-08T18:00:00Z`` on ``populate`` for a smoke search;
+repeat the option for additional exact event starts. These are individual dates,
+not a range. Offset-aware inputs are converted to UTC; unqualified timestamps
+are interpreted as UTC. Starts must fall on whole hours. Omitting this option
+searches the frozen date range with its saved interval. The date range follows
+the existing engine's inclusive midnight endpoints, not the entire final day.
+
+``populate`` always creates a fresh duration workspace. It records resolved
+search settings and hashes of the snapshot and domain Items in
+``<duration>hr-events/population-settings.json`` before computation. It refuses
+an existing directory, including a completed smoke collection. Use a new catalog
+generation for a replacement search; there is no destructive population flag.
+
+``resume`` supports a recorded full search with partial ``storm-stats.csv``,
+matching settings and domain hashes, and no Items or DSS yet. Worker counts may
+change. It refuses smoke searches, legacy searches without the provenance file,
+and interruptions after Item creation starts, where reranking could associate
+old rank-addressed products with different events. Inspect and reconcile those
+runs separately. When no search dates are missing, resume proceeds to ranking
+without repeating discovery. Run only one mutating operation per catalog at a
+time; the workflow does not provide interprocess locking.
+
+``export-dss`` requires either ``--item-ids 1 2 3`` or ``--all-items``. It uses the
+saved source/target modes, grid resolution, target buffer, and valid-region
+choice. ``--output-modes target`` or ``--output-modes source target`` explicitly
+overrides the modes. Exporting existing selected products requires
+``--overwrite``; this replaces selected DSS files and updates their metadata and
+the collection manifest. It is not an atomic operation or an automatic
+skip-existing resume. Preserve a verified backup before replacing useful
+outputs, or select only unexported/failed Items.
+
+All commands accept ``--dry-run`` for read-only validation and JSON plans. A
+refusal still fails during a dry run; add ``--overwrite --dry-run`` to inspect a
+proposed DSS replacement without performing it. Export prints its per-item JSON
+summary. Failures and partial exports return exit code 1; argument errors return
+2 and interruption returns 130. ``--traceback`` includes diagnostic tracebacks.
+Successful execution does not establish search completeness or engineering
+acceptance; review the statistics and retained validation evidence.
+
+The shared Python functions are ``populate_catalog``, ``resume_catalog``, and
+``export_catalog_dss`` in ``stormhub.met.catalog_population``. GeoParquet and
+normal-precipitation products remain optional notebook/API steps.
+
+Python API
+~~~~~~~~~~
+
 A config file shown below includes the information required to create a new catalog.
 
 .. code-block:: json

@@ -28,6 +28,14 @@ stormhub.met.catalog_setup module
    :undoc-members:
    :show-inheritance:
 
+stormhub.met.catalog_population module
+-------------------------------------
+
+.. automodule:: stormhub.met.catalog_population
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 stormhub.met.consts module
 --------------------------
 

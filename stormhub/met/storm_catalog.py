@@ -2360,7 +2360,7 @@ def new_collection(
         end_date = datetime.now().strftime("%Y-%m-%dT%H")
 
     # logging.info(f"specific_dates: {specific_dates}")
-    if not specific_dates:
+    if specific_dates is None:
         logging.info("Generating date range from %s to %s", start_date, end_date)
         dates = generate_date_range(start_date, end_date, every_n_hours=check_every_n_hours)
     elif len(specific_dates) > 0:
@@ -2468,7 +2468,7 @@ def resume_collection(
     dates = find_missing_storm_dates(partial_stats_csv, start_date, end_date, every_n_hours=check_every_n_hours)
     logging.info("%d dates found missing from %s - %s.", len(dates), start_date, end_date)
 
-    new_collection(
+    return new_collection(
         catalog=storm_catalog,
         start_date=start_date,
         end_date=end_date,
