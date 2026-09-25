@@ -151,8 +151,62 @@ The shared Python functions are ``populate_catalog``, ``resume_catalog``, and
 ``export_catalog_dss`` in ``stormhub.met.catalog_population``. GeoParquet and
 normal-precipitation products remain optional notebook/API steps.
 
-Python API
-~~~~~~~~~~
+Adopting a stopped notebook checkpoint
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``stormhub adopt-checkpoint`` migrates an older search that lacks
+``population-settings.json``. It retains completed event statistics and separates
+old rank-addressed Items, DSS, rankings, and derived products before resuming.
+It does not start computation or stop notebook processes itself.
+
+1. Interrupt the notebook search and verify that its worker processes have
+   stopped. Do not run another writer against this catalog during migration.
+2. Confirm that **all** retained statistics used the current watershed and
+   transposition geometry and selected duration. Review the displayed frozen
+   search dates, interval, threshold, and retained count against the actual
+   kernel settings; saved notebook source may differ from those settings.
+3. Review a dry run and retain its checkpoint fingerprint:
+
+   .. code-block:: powershell
+
+      $plan = stormhub adopt-checkpoint catalogs/lwi-region3-geometry-v2 --duration 72 --dry-run | ConvertFrom-Json
+      $plan | ConvertTo-Json -Depth 10
+
+4. Execute against that exact checkpoint, then inspect the resume plan:
+
+   .. code-block:: powershell
+
+      stormhub adopt-checkpoint catalogs/lwi-region3-geometry-v2 --duration 72 --settings-confirmed --writers-stopped --expected-checkpoint-sha256 $plan.checkpoint_sha256
+      stormhub resume catalogs/lwi-region3-geometry-v2 --duration 72 --workers 16 --dry-run
+      stormhub resume catalogs/lwi-region3-geometry-v2 --duration 72 --workers 16
+
+The operator flags attest historical settings and stopped writers. CSV files
+cannot prove which geometry or duration generated their rows. Adoption checks
+the exact CSV columns, unique dates within the full search's date/interval grid,
+finite numeric values, and ordered precipitation statistics. It refuses malformed
+or incomplete rows instead of silently discarding them. Same-geometry smoke rows
+may seed the full search when they satisfy this contract.
+
+Before moving anything, adoption writes a file-count/byte-total/SHA-256 inventory
+and a ZIP of the complete selected collection, root catalog, frozen settings,
+and domain Items. Every ZIP member is read back and verified. It checks source
+hashes again before switching, preserves the original directory under
+``_checkpoint-adoptions/<unique-id>/retired/``, removes only its root child link,
+and installs a statistics-only workspace with an explicitly adopted provenance
+record. A checksummed receipt preserves the operator attestations and archive
+identity. The new workspace must pass the normal resume preflight.
+
+Caught switch failures roll back the root and old directory. No files are deleted.
+An abrupt host/process failure may require manual recovery: stop all writers,
+inspect ``transaction.json``, preserve any newly active workspace, restore the
+selected directory from ``retired/`` (or the verified ZIP), and restore
+``catalog.before.json`` as the root. Never extract the archive over active results.
+The ZIP includes the selected collection only; other root child links may refer
+to collections outside that backup. Adoption is not an interprocess lock, and
+the archive remains on the same disk.
+
+Python API examples
+~~~~~~~~~~~~~~~~~~~
 
 A config file shown below includes the information required to create a new catalog.
 

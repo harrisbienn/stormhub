@@ -180,6 +180,13 @@ Do not reuse historical statistics, ranked tables, or numeric Item directories.
 ``stormhub resume`` and the notebook's ``resume_catalog`` only continue a recorded
 full search with unchanged settings/domain hashes and partial statistics, before
 Items or DSS are created. They refuse smoke searches and older unrecorded runs.
+An older notebook checkpoint can instead be explicitly migrated with
+``stormhub adopt-checkpoint`` after all writers stop and the operator confirms
+its actual settings. Adoption retains compatible statistics, including same-input
+smoke dates, and preserves the entire old collection before retiring its ranked
+products and removing its root child link. Follow the user guide's stopped
+checkpoint adoption procedure; never fabricate a normal population record for
+unverified historical statistics.
 ``workflows/rebuild_ranked_items.py`` reranks existing statistics and
 cannot perform a geometry rerun. The notebook's resume cell is an alternative
 for an interrupted search, disabled by default with ``RUN_RESUME=False``;

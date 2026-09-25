@@ -36,6 +36,14 @@ stormhub.met.catalog_population module
    :undoc-members:
    :show-inheritance:
 
+stormhub.met.catalog_checkpoint module
+-------------------------------------
+
+.. automodule:: stormhub.met.catalog_checkpoint
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 stormhub.met.consts module
 --------------------------
 

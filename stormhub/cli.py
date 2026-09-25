@@ -24,6 +24,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("populate", "Search and rank storms into a fresh duration collection"),
         ("resume", "Resume a recorded interrupted full search before Item creation"),
         ("export-dss", "Export DSS for selected Items in an existing collection"),
+        ("adopt-checkpoint", "Archive and adopt a stopped legacy search checkpoint"),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("catalog", type=Path, help="Catalog directory or local catalog.json")
@@ -32,8 +33,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--dry-run", action="store_true", help="Validate and print the plan without writes or AORC access"
         )
         command.add_argument("--traceback", action="store_true", help="Include tracebacks when diagnosing failures")
-        if name != "export-dss":
+        if name in {"populate", "resume"}:
             command.add_argument("--workers", type=int, help="Override the frozen worker count")
+        if name == "adopt-checkpoint":
+            command.add_argument(
+                "--settings-confirmed",
+                action="store_true",
+                help="Attest all retained rows used the displayed duration and geometry",
+            )
+            command.add_argument(
+                "--writers-stopped", action="store_true", help="Attest the notebook and all search workers have stopped"
+            )
+            command.add_argument(
+                "--expected-checkpoint-sha256", help="Fingerprint from the reviewed stopped-writer dry run"
+            )
         if name == "populate":
             command.add_argument(
                 "--specific-date",
@@ -59,7 +72,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         from stormhub.met.catalog_population import export_catalog_dss, populate_catalog, resume_catalog
 
         common = {"duration_hours": args.duration, "dry_run": args.dry_run}
-        if args.command == "export-dss":
+        if args.command == "adopt-checkpoint":
+            from stormhub.met.catalog_checkpoint import adopt_checkpoint
+
+            result = adopt_checkpoint(
+                args.catalog,
+                settings_confirmed=args.settings_confirmed,
+                writers_stopped=args.writers_stopped,
+                expected_checkpoint_sha256=args.expected_checkpoint_sha256,
+                **common,
+            )
+        elif args.command == "export-dss":
             result = export_catalog_dss(
                 args.catalog,
                 item_ids=args.item_ids,
@@ -72,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             operation = populate_catalog if args.command == "populate" else resume_catalog
             options = {"specific_dates": args.specific_date} if args.command == "populate" else {}
             result = operation(args.catalog, num_workers=args.workers, with_tb=args.traceback, **common, **options)
-        if args.dry_run or args.command == "export-dss":
+        if args.dry_run or args.command in {"export-dss", "adopt-checkpoint"}:
             print(json.dumps(result, indent=2))
         else:
             logging.info("%s completed: %s", args.command, result.id)

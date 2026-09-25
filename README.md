@@ -103,7 +103,7 @@ pip install -e .
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
 
 Catalog population is available through `stormhub populate`, `stormhub resume`,
-and `stormhub export-dss` (also `python -m stormhub`). After updating an editable
+`stormhub export-dss`, and `stormhub adopt-checkpoint` (also `python -m stormhub`). After updating an editable
 checkout, run `python -m pip install --no-deps -e .` to register the new command.
 
 ```powershell
@@ -116,6 +116,10 @@ stormhub export-dss catalogs/lwi-region3-geometry-v2 --duration 24 --item-ids 1 
 Remove `--dry-run` to execute. These commands read the selected catalog's frozen
 `creation-settings.json`. Population refuses an existing duration directory;
 resume requires matching saved search provenance and no existing Items or DSS.
+Older notebook checkpoints can be migrated with `adopt-checkpoint` after stopping
+all writers and confirming their scientific settings. It verifies a complete
+collection backup, retains statistics, and retires stale ranked products before
+enabling resume; `--dry-run` provides the fingerprint required to apply it.
 Export requires `--item-ids ...` or `--all-items`, and refuses existing selected
 outputs unless `--overwrite` is explicit. See the
 [CLI workflow and limitations](docs/source/user_guide.rst#catalog-command-line-workflow).

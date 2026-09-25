@@ -197,8 +197,20 @@ def resume_catalog(
     expected = context.provenance(search)
     record_path = context.directory / "population-settings.json"
     if not record_path.is_file():
-        raise ValueError("Resume requires population-settings.json from populate; legacy searches cannot be adopted")
+        raise ValueError("Resume requires population-settings.json; review legacy searches with adopt-checkpoint first")
     record = json.loads(record_path.read_text(encoding="utf-8"))
+    adoption = record.pop("adoption", None)
+    if adoption is not None:
+        receipt = context.catalog_file.parent / adoption["receipt"]
+        if (
+            receipt.resolve() != receipt
+            or not receipt.is_relative_to(context.catalog_file.parent / "_checkpoint-adoptions")
+            or hashlib.sha256(receipt.read_bytes()).hexdigest() != adoption["sha256"]
+        ):
+            raise ValueError("Adoption receipt is missing, outside the catalog, or changed")
+        evidence = json.loads(receipt.read_bytes())
+        if evidence.get("provenance") != expected or evidence.get("origin") != "operator-confirmed-legacy-checkpoint":
+            raise ValueError("Adoption receipt does not match the expected search provenance")
     if record != expected:
         raise ValueError("Resume settings or geometry differ, or this was a smoke search; use a new catalog")
     allowed = {"population-settings.json", "storm-stats.csv", "ranked-storms.csv"}
