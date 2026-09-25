@@ -50,6 +50,10 @@ jobs:
         run: python -m ruff format --check stormhub/server/serve.py tests/test_preview_server.py tests/test_requests_security.py .github/scripts/install_ci_dependencies.py
       - name: Check installed wheel imports and schema assets
         run: python -I -c "import stormhub.publishing, stormhub.server.serve; from importlib.resources import files; assert list(files('stormhub.scenarios').joinpath('schemas').iterdir())"
+      - name: Check installed CLI entry points without scientific dependencies
+        run: |
+          stormhub --help
+          python -I -m stormhub --help
       - name: Run portable contracts and security regressions
         run: >-
           python -I -m pytest -q

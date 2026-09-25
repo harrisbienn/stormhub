@@ -39,7 +39,10 @@ The catalog stores USGS gage items with:
 ### STAC Server
 Use `stormhub-server <directory>` to preview trusted local catalogs at
 `http://127.0.0.1:5000`. Stop it with **Ctrl+C**. There is no HTTP shutdown or write
-endpoint. Display names are HTML-escaped and links are URL-encoded. Resolved file,
+endpoint. Directories containing `catalog.json` or `collection.json` show an
+**Open in STAC Browser** link for browsing from the computer running the server.
+Restart an already-running server after updating StormHub to load this change.
+Display names are HTML-escaped and links are URL-encoded. Resolved file,
 directory, and index paths must remain inside the selected root; external symlinks
 and Windows junctions are denied and omitted from listings. Internal links are
 allowed. Keep the root and its ancestors writable only by trusted operators: this
@@ -50,8 +53,17 @@ example `stormhub-server <directory> 192.0.2.10 5000 --allow-network`. This expo
 an **unauthenticated** preview to that network. The preview is not a cloud model
 library endpoint. A staff-only library needs its own authenticated, authorized,
 read-only service behind private ingress and TLS. CORS permits the hosted
-[Radiant Earth STAC Browser](https://radiantearth.github.io/stac-browser/); CORS is
+[STAC Browser](https://browser.moregeo.it) and its legacy Radiant Earth origin; CORS is
 browser policy, not access control. Serve only content you trust, including HTML.
+
+If STAC Browser reports that `http://127.0.0.1:5000/catalog.json` cannot be
+loaded, first open that URL directly to check the server and selected directory.
+The old Radiant Earth viewer now redirects to `browser.moregeo.it`; restart
+StormHub after updating so its CORS headers allow the current viewer origin.
+Reopen **Open in STAC Browser** from the local directory listing. If your browser
+requests local-network access for `browser.moregeo.it`, allow it to read this
+local preview; a previously denied permission can be changed in the site's
+browser settings.
 
 StormHub also exposes `stormhub.publishing.publish_authenticated_item` as a
 domain-neutral publication boundary. A caller supplies its own Item identity,
@@ -89,6 +101,34 @@ pip install -e .
 
 ## Usage
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
+
+Catalog population is available through `stormhub populate`, `stormhub resume`,
+`stormhub export-dss`, and `stormhub adopt-checkpoint` (also `python -m stormhub`). After updating an editable
+checkout, run `python -m pip install --no-deps -e .` to register the new command.
+
+```powershell
+# Inspect the plan before starting a fresh duration search.
+stormhub populate catalogs/lwi-region3-geometry-v2 --duration 24 --dry-run
+# Export only selected Items after reviewing a completed collection.
+stormhub export-dss catalogs/lwi-region3-geometry-v2 --duration 24 --item-ids 1 --dry-run
+```
+
+Remove `--dry-run` to execute. These commands read the selected catalog's frozen
+`creation-settings.json`. Population refuses an existing duration directory;
+resume requires matching saved search provenance and no existing Items or DSS.
+Older notebook checkpoints can be migrated with `adopt-checkpoint` after stopping
+all writers and confirming their scientific settings. It verifies a complete
+collection backup, retains statistics, and retires stale ranked products before
+enabling resume; `--dry-run` provides the fingerprint required to apply it.
+Export requires `--item-ids ...` or `--all-items`, and refuses existing selected
+outputs unless `--overwrite` is explicit. See the
+[CLI workflow and limitations](docs/source/user_guide.rst#catalog-command-line-workflow).
+
+For the LWI Region 3 geometry revision, follow the
+[catalog rerun runbook](docs/source/lwi_geometry_rerun.rst). It records the
+2026-09-24 archive verification and the fresh search, DSS validation, and
+FloodForecast handoff steps. Build the replacement in a new catalog directory;
+existing catalog paths remain historical references.
 
 ## Sources and References
 - **AORC Dataset** - 1km hourly gridded precipitation data, available through NOAA.
