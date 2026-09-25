@@ -17,7 +17,7 @@
     "end_date": "2025-12-31",
     "top_n_events": 460,
     "check_every_n_hours": 6,
-    "num_workers": 8,
+    "num_workers": 16,
     "use_threads": false,
     "storm_duration_hours": 72,
     "min_precip_threshold_inches": 2.5,
