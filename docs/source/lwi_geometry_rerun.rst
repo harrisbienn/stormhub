@@ -5,9 +5,36 @@ Preparation recorded on 2026-09-24. Generation is tracked by
 `StormHub #15 <https://github.com/harrisbienn/stormhub/issues/15>`_; adoption is
 tracked by
 `FloodForecast #105 <https://github.com/harrisbienn/floodforecast/issues/105>`_.
-No replacement catalog has been generated or accepted by this documentation
-change. Updated geometry paths, hashes, and engineering disposition remain to
-be recorded in the issue before execution.
+The operator supplied the replacement inputs on 2026-09-25. Both notebooks now
+read ``configs/params-config.json`` and target ``lwi-region3-geometry-v2``.
+No replacement catalog or DSS population has been generated or accepted.
+Engineering review of the prepared footprint and derived valid transposition
+region remains part of the pre-search workflow.
+
+Supplied HUC8 inputs
+-------------------
+
+The configured inputs are Esri JSON, not GeoJSON despite the ``.json`` suffix:
+
+* Watershed: ``data/lwi-region3/lwi_r3_huc8_domain.json``; 11 valid Polygon
+  features in EPSG:4269 (NAD83); SHA-256
+  ``f6e4be3308ab0a056975f53db983eacda868029c0b405baee9957586cf0a1d5d``.
+* Climate region:
+  ``data/lwi-region3/lwi_r3_huc8_climate_transposition_domain.json``;
+  one valid Polygon in EPSG:4326 (WGS84); SHA-256
+  ``f06a6640f8de7e43bc9359fab61f95205bae3ee75aacce9587b01d7d08c0c530``.
+
+The creation notebook verifies these source hashes, reprojects to WGS84, and
+unions all watershed features into one valid Polygon without simplification,
+buffering, or repair. The climate region covers the entire prepared watershed.
+Single-feature GeoJSON derivatives are written under the new catalog's
+``inputs/`` directory; source files remain unchanged. The new domain IDs are
+``lwi-r3-huc8-domain`` and ``lwi-r3-huc8-climate-transposition-domain``.
+
+The local environment's GeoPandas bulk dissolve failed with Shapely 2.0.5 and
+NumPy 2.4.6. Preparation uses pairwise geometric union, which passed against all
+11 source features. This does not establish readiness of the remaining native
+search/DSS stack; retain the representative export checks before full execution.
 
 Both the watershed and transposition region have changed. The watershed is
 the precipitation-averaging footprint and the region bounds the storm search.
@@ -63,12 +90,11 @@ matched. FloodForecast's clean component verification passed before branching.
 1. Preserve the revised input files under new names and record their SHA-256,
    source, CRS, and engineering disposition. Review valid polygon geometry,
    watershed footprint, and the intended transposition region.
-2. In ``notebooks/catalog_creation.ipynb``, set ``WATERSHED_PATH`` and
-   ``TRANSPOSITION_REGION_PATH`` to those inputs. Use new watershed and region
-   IDs in the generated configuration; do not reuse historical IDs for changed
-   geometry.
-3. Set a fresh ``CATALOG_ID`` in both creation and population notebooks.
-   ``lwi-region3-geometry-v2`` is the proposed name. Confirm the destination
+2. Verify the paths, hashes, and new watershed/region IDs in
+   ``configs/params-config.json``. The creation notebook resolves those paths
+   against the repository root and prepares the single-polygon inputs.
+3. Both notebooks derive ``CATALOG_ID`` from the shared configuration.
+   ``lwi-region3-geometry-v2`` is configured. Confirm the destination
    does not already contain another generation before running ``new_catalog``.
 4. Create the catalog and inspect its watershed, transposition region, and
    derived valid transposition region. The valid region describes placements
@@ -80,12 +106,12 @@ The resulting layout should keep independent generations::
    catalogs/
      lwi-region3/                         # historical, unchanged
      lwi-region3-deprecated-20260924.zip   # historical archive
-     lwi-region3-geometry-v2/              # proposed new generation
+     lwi-region3-geometry-v2/              # configured new generation
 
 Freeze settings and rerun discovery
 ----------------------------------
 
-``notebooks/catalog_population.ipynb`` currently supplies these settings.
+``configs/params-config.json`` supplies both notebooks with these settings.
 They are inherited preparation defaults, not a new engineering approval:
 
 .. list-table::
@@ -111,10 +137,14 @@ They are inherited preparation defaults, not a new engineering approval:
    * - Source extraction region
      - ``use_valid_region=True``
 
-Resolve the search-step discrepancy explicitly:
-``configs/params-config.json`` says 24 hours, while the population notebook says
-6 hours. Record the selected value, all geometry/config hashes, and all export
-options in the generation evidence. ``use_valid_region`` affects source DSS
+The previous 24-hour config / 6-hour notebook discrepancy is resolved by retaining
+the population notebook's 6-hour step in the shared config. Search methodology
+and export choices remain subject to the pre-search review. Creation freezes a
+copy of the shared settings in the new catalog; population refuses a differing
+configuration. Select 24/48/72 hours through ``STORM_DURATION_HOURS`` in the
+population notebook without changing the frozen config between durations.
+Record all geometry/config hashes and export options in generation evidence.
+``use_valid_region`` affects source DSS
 coverage and must also be reviewed, particularly for the full HMS forcing
 domain. The search watershed, HMS forcing domain, and RAS coverage domain are
 separate concepts; a 5-km target buffer is not proof of model coverage.
@@ -122,7 +152,8 @@ separate concepts; a 5-km target buffer is not proof of model coverage.
 For each duration, set ``STORM_DURATION_HOURS`` and call ``new_collection``
 through the population notebook with ``SMOKE_TEST=False`` and
 ``CREATE_NEW_ITEMS=True``. Set ``RUN_DSS_EXPORT=False`` during discovery so a
-full export does not start before the new population is reviewed. The API
+full export does not start before the new population is reviewed (this is now
+the notebook default, with ``DSS_ITEM_IDS=["1"]`` for the smoke export). The API
 keyword is ``storm_duration``. Preserve the new ``storm-stats.csv``,
 ``ranked-storms.csv``, Items, and settings; check temporal search completeness
 before accepting the rankings.
@@ -131,7 +162,8 @@ Do not reuse historical statistics, ranked tables, or numeric Item directories.
 ``resume_collection`` only continues a search with the same geometry and
 settings. ``workflows/rebuild_ranked_items.py`` reranks existing statistics and
 cannot perform a geometry rerun. The notebook's resume cell is an alternative
-for an interrupted search, not a required second full-search step. If a resumed
+for an interrupted search, disabled by default with ``RUN_RESUME=False``;
+it is not a required second full-search step. If a resumed
 search changes rankings after Items were created, reconcile/rebuild those new
 Items before export; never let stale rank-addressed folders select old events.
 
@@ -195,3 +227,22 @@ publication dispositions separate and ``forecast_eligible = false``. Forecast
 and diversity-feature approvals are not added prerequisites for deterministic
 library generation. Component PRs track the parent; only the final accepted
 integration PR closes FloodForecast #105.
+
+Wiring validation on 2026-09-25
+-----------------------------
+
+Offline execution of the notebook preparation cells against the supplied files
+passed source hash verification, WGS84 polygon preparation, climate coverage,
+and a GeoJSON write/read round trip through ``HydroDomain``. Checks also passed
+for source checksum rejection, destination overwrite refusal, shared population
+defaults, frozen-config drift rejection, and syntax of all code cells. Outputs
+from the prior catalog were cleared from both notebooks to avoid presenting
+historical results as evidence for the new geometry.
+
+``components verify`` reports the expected StormHub branch/revision mismatch
+while this work is on the unmerged rerun branch; other component and historical
+schema checks passed. Keep the lock unchanged until merge. AORC-derived valid
+region creation, full storm discovery, DSS export, and HTML rendering are not
+validated by these offline checks. The local environment has no Sphinx; run
+``python -m sphinx -b html docs/source docs/build/html`` in the documentation
+environment to check rendered documentation.

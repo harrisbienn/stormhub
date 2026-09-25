@@ -1,22 +1,32 @@
 {
-   "watershed": {
-      "id": "lwi-r3-huc12-domain",
-      "geometry_file": "c:\\Users\\ah5766\\code\\stormhub\\data\\lwi-region3\\lwi_r3_huc12_domain.json",
-      "description": "LWI Region 3 HUC12 watershed domain"
+  "catalog_id": "lwi-region3-geometry-v2",
+  "watershed": {
+    "id": "lwi-r3-huc8-domain",
+    "geometry_file": "data/lwi-region3/lwi_r3_huc8_domain.json",
+    "source_sha256": "f6e4be3308ab0a056975f53db983eacda868029c0b405baee9957586cf0a1d5d",
+    "description": "LWI Region 3 HUC8 watershed domain"
   },
-   "transposition_region": {
-      "id": "lwi-r3-transposition-domain",
-      "geometry_file": "c:\\Users\\ah5766\\code\\stormhub\\data\\lwi-region3\\lwi_r3_climate_transposition_domain.json",
-      "description": "LWI Region 3 transposition domain"
+  "transposition_region": {
+    "id": "lwi-r3-huc8-climate-transposition-domain",
+    "geometry_file": "data/lwi-region3/lwi_r3_huc8_climate_transposition_domain.json",
+    "source_sha256": "f06a6640f8de7e43bc9359fab61f95205bae3ee75aacce9587b01d7d08c0c530",
+    "description": "LWI Region 3 HUC8 climate transposition domain"
   },
-   "params": {
-      "start_date": "1979-02-01",
-      "end_date": "2025-12-31",
-      "top_n_events": 460,
-      "check_every_n_hours": 24,
-      "num_workers": 8,
-      "storm_duration_hours": 72,
-      "min_precip_threshold_inches": 2.5,
-      "output_resolution_km": 1
-   }
+  "params": {
+    "start_date": "1979-02-01",
+    "end_date": "2025-12-31",
+    "top_n_events": 460,
+    "check_every_n_hours": 6,
+    "num_workers": 8,
+    "use_threads": false,
+    "storm_duration_hours": 72,
+    "min_precip_threshold_inches": 2.5,
+    "output_resolution_km": 1,
+    "dss_output_modes": [
+      "source",
+      "target"
+    ],
+    "target_buffer_km": 5,
+    "use_valid_region": true
+  }
 }
