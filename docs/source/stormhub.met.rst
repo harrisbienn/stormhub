@@ -20,6 +20,14 @@ stormhub.met.analysis module
    :undoc-members:
    :show-inheritance:
 
+stormhub.met.catalog_setup module
+--------------------------------
+
+.. automodule:: stormhub.met.catalog_setup
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 stormhub.met.consts module
 --------------------------
 

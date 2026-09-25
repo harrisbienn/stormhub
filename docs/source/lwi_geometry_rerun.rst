@@ -7,7 +7,9 @@ tracked by
 `FloodForecast #105 <https://github.com/harrisbienn/floodforecast/issues/105>`_.
 The operator supplied the replacement inputs on 2026-09-25. Both notebooks now
 read ``configs/params-config.json`` and target ``lwi-region3-geometry-v2``.
-No replacement catalog or DSS population has been generated or accepted.
+The replacement base catalog is now present locally; its eight files passed
+a read-only reuse check during the notebook refactor. No storm population or
+DSS generation was run as part of the wiring/refactor checks.
 Engineering review of the prepared footprint and derived valid transposition
 region remains part of the pre-search workflow.
 
@@ -94,8 +96,9 @@ matched. FloodForecast's clean component verification passed before branching.
    ``configs/params-config.json``. The creation notebook resolves those paths
    against the repository root and prepares the single-polygon inputs.
 3. Both notebooks derive ``CATALOG_ID`` from the shared configuration.
-   ``lwi-region3-geometry-v2`` is configured. Confirm the destination
-   does not already contain another generation before running ``new_catalog``.
+   ``lwi-region3-geometry-v2`` is configured. Keep ``EXISTING="error"`` for
+   fresh creation, or explicitly select ``"reuse"`` to verify and reopen this
+   same generation. Conflicting inputs require a new catalog ID.
 4. Create the catalog and inspect its watershed, transposition region, and
    derived valid transposition region. The valid region describes placements
    where the watershed can fit within the transposition region. Confirm it is
@@ -246,3 +249,22 @@ region creation, full storm discovery, DSS export, and HTML rendering are not
 validated by these offline checks. The local environment has no Sphinx; run
 ``python -m sphinx -b html docs/source docs/build/html`` in the documentation
 environment to check rendered documentation.
+
+Notebook refactor validation on 2026-09-25
+----------------------------------------
+
+Reusable creation logic now lives in ``stormhub.met.catalog_setup``. The
+notebook keeps configuration, inspection displays, package calls, and the
+generated-file listing. See the user guide's catalog-creation section for
+``EXISTING="error"`` versus ``"reuse"`` and the recommendation to stage and
+back up any future same-path replacement rather than add a destructive boolean.
+
+The setup and existing catalog test modules passed all 38 tests, using small
+real geometries and a stubbed AORC availability boundary. Coverage includes
+source mutation, CRS conversion, invalid/disconnected geometry, settings drift,
+prepared-input tampering, external/missing domain links, failed-build retry,
+and preservation of completed catalogs and event products. Ruff lint/format
+and diff whitespace checks passed. A read-only reuse of the current local
+base catalog verified all eight files' hashes and modification times unchanged.
+No AORC discovery, DSS regeneration, replacement, or deletion of a catalog was
+performed. The component-lock and HTML-build limitations above still apply.

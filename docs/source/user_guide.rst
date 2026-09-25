@@ -126,6 +126,41 @@ The following snippet provides an example of how to build and create a storm cat
    If using Windows, set `use_threads` to `False` in order to avoid issues with multiprocessing. On Linux/WSL, set `use_threads` to `True`.
    The use of ProcessPoolExecutor on Linux can lead to complications due to the way processes are spawned. More investigation is needed on this.
 
+Catalog creation from prepared domains
+-------------------------------------
+
+``notebooks/catalog_creation.ipynb`` delegates its reusable work to
+``stormhub.met.catalog_setup``:
+
+* ``load_catalog_settings`` validates the shared JSON configuration.
+* ``prepare_catalog_domains`` verifies source hashes and prepares WGS84 polygons.
+  Each ``PreparedDomain.summary()`` supplies notebook inspection metadata.
+* ``plot_catalog_domains`` returns Matplotlib axes for further customization.
+* ``prepare_catalog_inputs`` writes a new preparation workspace or verifies
+  identical saved inputs for reuse.
+* ``create_prepared_catalog`` calls the existing StormHub catalog builder or
+  loads an already completed matching catalog without writing it.
+
+Set ``EXISTING = "error"`` (the default) to refuse an existing destination.
+Set ``EXISTING = "reuse"`` to rerun the notebook against the same generation.
+Reuse requires matching saved settings/configuration, prepared geometry bytes,
+catalog identity, and local domain Items. It does not overwrite changed inputs.
+An interrupted AORC base build can be retried from complete verified inputs if
+the workspace contains only preparation and expected base-domain files.
+Incomplete input writes or unexpected event products require inspection.
+
+For changed geometry or result-defining settings, use a new catalog ID. There
+is intentionally no ``overwrite=True`` or delete-and-recreate option in these
+helpers. Replacing a referenced catalog under the same path requires a separate
+staged build, validation, checksum-complete backup, explicit operator selection,
+and rollback procedure. Existing published/historical references should retain
+their original catalog identities.
+
+These protections belong to the preparation helpers; the older low-level
+``new_catalog`` API retains its existing behavior. The notebook leaves simple
+parameter assignments, display expressions, and file listing visible; it no
+longer defines reusable functions or assembles configuration files inline.
+
 DSS source and target products
 ------------------------------
 
