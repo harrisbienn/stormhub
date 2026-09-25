@@ -53,8 +53,17 @@ example `stormhub-server <directory> 192.0.2.10 5000 --allow-network`. This expo
 an **unauthenticated** preview to that network. The preview is not a cloud model
 library endpoint. A staff-only library needs its own authenticated, authorized,
 read-only service behind private ingress and TLS. CORS permits the hosted
-[Radiant Earth STAC Browser](https://radiantearth.github.io/stac-browser/); CORS is
+[STAC Browser](https://browser.moregeo.it) and its legacy Radiant Earth origin; CORS is
 browser policy, not access control. Serve only content you trust, including HTML.
+
+If STAC Browser reports that `http://127.0.0.1:5000/catalog.json` cannot be
+loaded, first open that URL directly to check the server and selected directory.
+The old Radiant Earth viewer now redirects to `browser.moregeo.it`; restart
+StormHub after updating so its CORS headers allow the current viewer origin.
+Reopen **Open in STAC Browser** from the local directory listing. If your browser
+requests local-network access for `browser.moregeo.it`, allow it to read this
+local preview; a previously denied permission can be changed in the site's
+browser settings.
 
 StormHub also exposes `stormhub.publishing.publish_authenticated_item` as a
 domain-neutral publication boundary. A caller supplies its own Item identity,

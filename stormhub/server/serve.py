@@ -11,13 +11,20 @@ from pathlib import Path
 from urllib.parse import quote, unquote
 
 
+STAC_BROWSER_ORIGIN = "https://browser.moregeo.it"
+STAC_BROWSER_ORIGINS = frozenset({STAC_BROWSER_ORIGIN, "https://radiantearth.github.io"})
+
+
 class CORSRequestHandler(SimpleHTTPRequestHandler):
     """Serve files confined to a trusted directory, including resolved links."""
 
     def end_headers(self):
         """Allow the hosted STAC browser to read this local preview."""
-        self.send_header("Access-Control-Allow-Origin", "https://radiantearth.github.io")
-        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        origin = self.headers.get("Origin")
+        if origin in STAC_BROWSER_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("Vary", "Origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 
@@ -63,7 +70,7 @@ class CORSRequestHandler(SimpleHTTPRequestHandler):
             relative_path = document.relative_to(self.directory).as_posix()
             catalog_url = f"http://127.0.0.1:{self.server.server_port}/{quote(relative_path, safe='/')}"
             # Encode the nested URL for the viewer route, independently of HTML escaping.
-            viewer_url = "https://radiantearth.github.io/stac-browser/#/external/" + quote(catalog_url, safe=":/")
+            viewer_url = STAC_BROWSER_ORIGIN + "/external/" + quote(catalog_url, safe=":/")
             rows.append(
                 f'<p><a href="{html.escape(viewer_url, quote=True)}" target="_blank" '
                 'rel="noopener noreferrer">Open in STAC Browser</a> (on this computer)</p>'

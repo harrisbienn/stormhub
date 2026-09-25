@@ -45,6 +45,26 @@ users cannot modify. Symlinks/junctions resolving outside the root are denied.
 This unauthenticated development preview is not a cloud model-library service;
 CORS does not provide authentication or authorization.
 
+Troubleshooting STAC Browser
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The hosted viewer is now at `browser.moregeo.it <https://browser.moregeo.it>`_.
+The former Radiant Earth URL redirects there. StormHub allows CORS requests
+from these two exact origins and links directly to the current viewer.
+
+If the viewer says **The requested page could not be loaded**:
+
+1. Open the reported local request URL directly, for example
+   ``http://127.0.0.1:5000/catalog.json``. If it fails, check that the server is
+   running and that its selected directory contains the requested file.
+2. Stop the server with Ctrl+C and restart it after updating StormHub. An
+   already-running process retains the old CORS headers. Reopen **Open in STAC
+   Browser** from the local directory listing.
+3. If the browser requests local-network access for ``browser.moregeo.it``,
+   allow it for this local preview. If previously denied, change that site's
+   local-network permission in browser settings and reload the viewer. This
+   browser permission is separate from the server's CORS headers.
+
 
 
 Local file server is useful for interacting with STAC browser for viewing the data locally. This is not required....

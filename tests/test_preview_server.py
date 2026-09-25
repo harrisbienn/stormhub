@@ -26,10 +26,10 @@ def preview(tmp_path):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
-        def request(path="/", method="GET"):
+        def request(path="/", method="GET", headers=None):
             connection = HTTPConnection(*server.server_address, timeout=5)
             try:
-                connection.request(method, path)
+                connection.request(method, path, headers=headers or {})
                 response = connection.getresponse()
                 return response.status, dict(response.getheaders()), response.read()
             finally:
@@ -50,9 +50,34 @@ def test_preview_read_only_and_no_shutdown(preview):
     status, headers, body = request("/catalog.json")
     assert status == 200
     assert body == b'{"id":"preview"}'
-    assert headers["Access-Control-Allow-Origin"] == "https://radiantearth.github.io"
+    assert "Access-Control-Allow-Origin" not in headers
     assert request("/", "HEAD")[2] == b""
     assert request("/", "OPTIONS")[0] == 204
+
+
+@pytest.mark.parametrize("origin", ["https://browser.moregeo.it", "https://radiantearth.github.io"])
+@pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
+def test_hosted_viewer_cors(preview, origin, method):
+    """Allow the current viewer and legacy origin for reads and preflight."""
+    _, request = preview
+    request_headers = {"Origin": origin}
+    if method == "OPTIONS":
+        request_headers["Access-Control-Request-Method"] = "GET"
+    status, headers, _ = request("/catalog.json", method, request_headers)
+    assert status == (204 if method == "OPTIONS" else 200)
+    assert headers["Access-Control-Allow-Origin"] == origin
+    assert headers["Access-Control-Allow-Methods"] == "GET, HEAD, OPTIONS"
+    assert headers["Vary"] == "Origin"
+
+
+@pytest.mark.parametrize("origin", ["https://browser.moregeo.it.example.com", "http://browser.moregeo.it", "null"])
+@pytest.mark.parametrize("method", ["GET", "OPTIONS"])
+def test_other_origins_have_no_cors_grant(preview, origin, method):
+    """Match complete trusted origins without enabling arbitrary websites."""
+    _, request = preview
+    _, headers, _ = request("/catalog.json", method, {"Origin": origin})
+    assert "Access-Control-Allow-Origin" not in headers
+    assert headers["Vary"] == "Origin"
 
 
 def test_listing_encodes_names_and_request_path(preview):
@@ -82,7 +107,7 @@ def _viewer_links(body):
         def handle_starttag(self, tag, attrs):
             """Capture viewer anchors with HTML entities decoded."""
             href = dict(attrs).get("href", "")
-            if tag == "a" and href.startswith("https://radiantearth.github.io/stac-browser/"):
+            if tag == "a" and href.startswith("https://browser.moregeo.it/"):
                 self.hrefs.append(href)
 
     parser = Links()
@@ -103,15 +128,20 @@ def test_listing_links_current_stac_document(preview, filename):
         assert status == 200
         links = _viewer_links(body)
         assert len(links) == 1
-        target = urlsplit(unquote(urlsplit(links[0]).fragment.removeprefix("/external/")))
+        viewer = urlsplit(links[0])
+        assert viewer.path.startswith("/external/")
+        assert not viewer.query and not viewer.fragment
+        target = urlsplit(unquote(viewer.path.removeprefix("/external/")))
         assert target.scheme == "http"
         assert target.hostname == "127.0.0.1"
         assert target.port is not None and target.port != 0
         assert target.path == directory + document
         assert not target.query and not target.fragment
         with closing(HTTPConnection(target.hostname, target.port, timeout=5)) as connection:
-            connection.request("GET", target.path)
-            assert connection.getresponse().status == 200
+            connection.request("GET", target.path, headers={"Origin": f"{viewer.scheme}://{viewer.netloc}"})
+            response = connection.getresponse()
+            assert response.status == 200
+            assert response.getheader("Access-Control-Allow-Origin") == "https://browser.moregeo.it"
 
 
 def test_listing_without_stac_has_no_viewer_link(preview):
