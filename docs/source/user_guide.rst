@@ -35,7 +35,11 @@ production, but is useful for visualizing and exploring the data.
       stormhub-server <path-to-local-dir>
 
 The preview binds to ``127.0.0.1`` by default. Stop it with Ctrl+C; HTTP shutdown
-and write operations are unavailable. Non-loopback binding requires an explicit
+and write operations are unavailable. Open a directory containing
+``catalog.json`` or ``collection.json`` and click **Open in STAC Browser**.
+The link uses the active server port and is intended for the computer running
+the server. Restart the server after updating StormHub if the link is absent.
+Non-loopback binding requires an explicit
 host and ``--allow-network``. Use only trusted content and a directory that other
 users cannot modify. Symlinks/junctions resolving outside the root are denied.
 This unauthenticated development preview is not a cloud model-library service;

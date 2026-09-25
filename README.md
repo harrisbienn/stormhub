@@ -39,7 +39,10 @@ The catalog stores USGS gage items with:
 ### STAC Server
 Use `stormhub-server <directory>` to preview trusted local catalogs at
 `http://127.0.0.1:5000`. Stop it with **Ctrl+C**. There is no HTTP shutdown or write
-endpoint. Display names are HTML-escaped and links are URL-encoded. Resolved file,
+endpoint. Directories containing `catalog.json` or `collection.json` show an
+**Open in STAC Browser** link for browsing from the computer running the server.
+Restart an already-running server after updating StormHub to load this change.
+Display names are HTML-escaped and links are URL-encoded. Resolved file,
 directory, and index paths must remain inside the selected root; external symlinks
 and Windows junctions are denied and omitted from listings. Internal links are
 allowed. Keep the root and its ancestors writable only by trusted operators: this

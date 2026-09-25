@@ -3,10 +3,12 @@
 import os
 import subprocess
 import threading
+from contextlib import closing
 from functools import partial
+from html.parser import HTMLParser
 from http.client import HTTPConnection
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import pytest
 
@@ -66,6 +68,68 @@ def test_listing_encodes_names_and_request_path(preview):
     assert "storm &amp; &#x27;rain&#x27;" in text
     assert f'href="{quote(name)}"' in text
     assert request("/" + quote(name))[2] == b"safe"
+
+
+def _viewer_links(body):
+    class Links(HTMLParser):
+        """Collect hosted viewer links from the rendered page."""
+
+        def __init__(self):
+            """Initialize the parser and its collected links."""
+            super().__init__()
+            self.hrefs = []
+
+        def handle_starttag(self, tag, attrs):
+            """Capture viewer anchors with HTML entities decoded."""
+            href = dict(attrs).get("href", "")
+            if tag == "a" and href.startswith("https://radiantearth.github.io/stac-browser/"):
+                self.hrefs.append(href)
+
+    parser = Links()
+    parser.feed(body.decode())
+    return parser.hrefs
+
+
+@pytest.mark.parametrize("filename", ["catalog.json", "collection.json"])
+def test_listing_links_current_stac_document(preview, filename):
+    """Open the current directory's encoded STAC URL on the actual server port."""
+    root, request = preview
+    folder = root / "storm & 'rain' #1%"
+    folder.mkdir()
+    (folder / filename).write_text('{"id":"nested"}')
+    path = "/" + quote(folder.name) + "/"
+    for directory, document in (("/", "catalog.json"), (path, filename)):
+        status, _, body = request(directory + "?label=%3Cscript%3E")
+        assert status == 200
+        links = _viewer_links(body)
+        assert len(links) == 1
+        target = urlsplit(unquote(urlsplit(links[0]).fragment.removeprefix("/external/")))
+        assert target.scheme == "http"
+        assert target.hostname == "127.0.0.1"
+        assert target.port is not None and target.port != 0
+        assert target.path == directory + document
+        assert not target.query and not target.fragment
+        with closing(HTTPConnection(target.hostname, target.port, timeout=5)) as connection:
+            connection.request("GET", target.path)
+            assert connection.getresponse().status == 200
+
+
+def test_listing_without_stac_has_no_viewer_link(preview):
+    """Avoid offering a broken viewer for an ordinary asset directory."""
+    root, request = preview
+    (root / "assets").mkdir()
+    assert _viewer_links(request("/assets/")[2]) == []
+
+
+def test_external_catalog_link_has_no_viewer_link(preview, tmp_path):
+    """Do not offer an external catalog reached through a filesystem link."""
+    root, request = preview
+    folder = root / "linked"
+    folder.mkdir()
+    outside = tmp_path / "private.json"
+    outside.write_text('{"id":"private"}')
+    _link(folder / "catalog.json", outside)
+    assert _viewer_links(request("/linked/")[2]) == []
 
 
 def _link(link, target, directory=False):
