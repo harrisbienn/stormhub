@@ -393,22 +393,52 @@ The 12 affected pairs and their previous metadata are preserved in the local
 coverage-repair backup before selective replacement. Subsequent exports record
 the enlarged retrieval method and padding in their validation evidence.
 
-Approved 72-hour event-population exclusion
-------------------------------------------
+Approved 72-hour event-population exclusions
+-------------------------------------------
 
-On 2026-09-28 the operator approved excluding original rank 193 and accepting
-a 459-event 72-hour population, subject to validation of the other events.
-Its 1998-12-10 00:00 through 1998-12-13 00:00 UTC storm has upstream AORC nodata
-at the final hour. Native DSS readback found 1,681 missing watershed cells;
-a direct NOAA Zarr probe confirmed the missing source value. This is distinct
-from the nine excluded search starts requiring unavailable 2026 data.
+On 2026-09-28 the operator approved excluding original ranks 193 and 219 and
+accepting a 458-event 72-hour population. This supersedes the earlier approval
+for rank 193 alone and a conditional 459-event population.
 
-Record this decision in ``72hr-events/population-disposition.json``. Retain the
-failed Item, both DSS files, and validation/upstream evidence in the recovery
-archive; remove the event from the active collection only after export writers
-finish. Keep original rank IDs with the gap at 193, preserve the original
-statistics/ranking table and frozen settings, and publish the accepted ranking
-subset separately. The accepted population is 459 source/target pairs (918
-DSS assets), with no automatic backfill, renumbering, or imputation. Additional
-event failures require a separate disposition. This population-count approval
-does not constitute HMS/RAS engineering qualification.
+Rank 193's 1998-12-10 00:00 through 1998-12-13 00:00 UTC storm has upstream
+AORC nodata at the final hour. Native DSS readback found 1,681 missing watershed cells;
+a direct NOAA Zarr probe confirmed the missing source value. Rank 219's
+1986-11-07 00:00 through 1986-11-10 00:00 UTC storm has missing watershed values
+in 25 hourly records, from 1986-11-09 00:00 through 1986-11-10 00:00 UTC.
+Native readback found 150,725 missing cell-hour values; direct NOAA Zarr probes
+confirmed upstream nodata at an affected source location. Both target
+files contain 72 records and cover the watershed envelope. Repeating export
+with the same upstream data cannot fill these gaps; zero rainfall must not be
+substituted for missing data. These event exclusions are distinct from the nine
+excluded search starts requiring unavailable 2026 data.
+
+The decision is recorded in ``72hr-events/population-disposition.json``, linked
+as collection metadata. After export finished, both failed Items and their four
+DSS files were removed from the active collection and preserved under
+``_recovery/20260928-72hr/excluded-r193-r219/``. Before moving them, the
+``before-exclusion.zip`` backup was verified against a SHA-256 inventory of
+945 metadata/evidence/output files totaling 23,108,035 uncompressed bytes.
+Its SHA-256 is
+``0c87ffff679c0ba0ba743467ace12950d450c7db2c774cd13735be9a4b1c6959``.
+This is a same-disk recovery archive, not an independent backup.
+
+The finalized active population contains 458 source/target pairs (916 DSS
+assets), with original rank IDs and gaps at 193 and 219. The collection's
+``ranked_storms`` asset points to ``accepted-ranked-storms.csv``;
+``search-ranked-storms`` retains the original ``ranked-storms.csv``. Statistics,
+the original ranking, frozen creation/population settings, and search-coverage
+receipt remain byte-for-byte unchanged. No backfill, renumbering, or imputation
+was performed.
+
+Final reconciliation verified all 916 retained DSS checksums, four quarantined
+DSS checksums, 916 passing manifest rows with no orphaned DSS, and 458 Items in
+the collection and both geographic indexes. Native coverage evidence includes
+the separate readback audit for the eight retained initial pairs. All 1,841
+local collection/Item asset links resolve within the catalog with portable
+relative paths. Terminal status is ``complete_with_documented_exclusions`` in
+``_recovery/20260928-72hr/run-status.json``; the exclusion directory contains
+``disposition-receipt.json`` and ``catalog-link-verification.json``.
+
+Additional event failures require a separate disposition. These approvals apply
+only to the 72-hour population and do not constitute HMS/RAS engineering
+qualification or approval to adopt the new forcing in FloodForecast.
