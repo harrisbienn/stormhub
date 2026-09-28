@@ -317,3 +317,128 @@ Keep ``configs/params-config.json`` for new creation and keep the catalog snapsh
 for existing-generation provenance and population. The runtime
 ``lwi-r3-config.json`` still binds prepared geometry paths/checksums. Historical
 ``lwi-region3/`` and its ZIP are unchanged by this migration.
+
+Recovering after discovery and Item-rendering failures
+-----------------------------------------------------
+
+A stopped process is not evidence of a complete catalog. Reconcile every
+expected search start against ``storm-stats.csv`` before accepting rankings,
+then check the selected ranks against actual Item JSON, thumbnails, and the
+collection's links. Empty numeric directories are failed attempts, not Items.
+The normal ``resume`` command deliberately refuses these directories.
+
+Hidden Windows workers previously attempted to create a Tk desktop window
+when rendering AORC thumbnails. Thumbnail generation now uses a Matplotlib Agg
+canvas directly, without changing the notebook's interactive backend. Check a
+real Item and representative DSS pair before rebuilding the remaining Items.
+
+Preserve statistics, rankings, catalog links, logs, and a checksum-complete
+backup before recovery. Once search coverage is reconciled, the package's
+``rebuild_ranked_collection_items`` API can regenerate Items from the retained
+statistics without repeating discovery; it quarantines existing numeric
+directories by default. Verify every intended Item before accepting the
+resulting collection or exporting its DSS. Keep the checkpoint-adoption receipt
+at the path referenced by ``population-settings.json``.
+
+The 72-hour search on 2026-09-27 retained 68,532 of 68,541 requested starts.
+The nine absent starts, 2025-12-29 00:00 through 2025-12-31 00:00 UTC at six-hour
+steps, require 2026 data. On 2026-09-28 NOAA's 2025 Zarr time axis ended at
+2025-12-31 23:00 UTC and the 2026 metadata returned HTTP 404. Do not silently
+shorten those storms or edit frozen settings to hide the missing dates. Record
+the unavailable windows and an explicit operator disposition, or defer
+finalization until data is available. A ranking from fewer requested windows
+must retain that qualification even if it yields all 460 selected events.
+
+For this 72-hour recovery, the operator accepted those nine unavailable windows
+as exclusions on 2026-09-28. The accepted search population is 68,532 available
+windows out of the original 68,541 requested starts. The first excluded start
+is 2025-12-29 00:00 UTC, the last is 2025-12-31 00:00 UTC, and all nine are on
+the six-hour grid. Frozen creation/population settings and retained statistics
+remain unchanged. Catalog-local ``72hr-events/search-coverage.json`` records
+each excluded start/end, the upstream availability evidence, approval, and
+input/statistics hashes; expose it as a collection metadata asset when the
+recovered collection is finalized. Describe this as complete with documented
+exclusions, not complete coverage of the original request. This disposition
+does not automatically approve exclusions for the 24- or 48-hour searches.
+
+Target precipitation coverage at placement-domain edges
+-------------------------------------------------------
+
+The valid transposition region limits storm placement; it must not truncate
+the precipitation needed to fill a target watershed. The initial 72-hour DSS
+batch exposed this at ranks 5 and 16, whose translated target grids stopped
+about 4.47 km short of the western watershed bound.
+
+For target exports, retrieval now includes the inverse-translated target
+footprint, its configured buffer, and two output-grid cells of padding for
+spatial selection/reprojection, in addition to the configured retrieval AOI.
+The inverse uses the same snapped SHG translation applied to the data. Search
+statistics, ranks, storm-placement geometry, and translation offsets are
+unchanged. The enlarged precipitation footprint may change the source grid
+extent and reprojection alignment; preserve and replace the complete affected
+source/target pair together so its source-to-target evidence stays consistent.
+
+Spatial validation requires finite, non-nodata values in every raster cell
+touching the watershed at every timestep, as well as envelope coverage and
+preserved source values. A bounding box alone cannot establish coverage.
+Back up affected outputs and metadata before explicit replacement; retain
+already accepted pairs only after checking their actual watershed coverage.
+
+Readback of all 72 records in each of the first 20 targets found affected ranks
+3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 16, and 17. The other eight pairs are retained.
+Export validation now also checks the actual reopened DSS grids using their
+stored origin and cell size; finite watershed coverage is required after
+serialization as well as before writing. Zero rainfall remains valid data.
+The 12 affected pairs and their previous metadata are preserved in the local
+coverage-repair backup before selective replacement. Subsequent exports record
+the enlarged retrieval method and padding in their validation evidence.
+
+Approved 72-hour event-population exclusions
+-------------------------------------------
+
+On 2026-09-28 the operator approved excluding original ranks 193 and 219 and
+accepting a 458-event 72-hour population. This supersedes the earlier approval
+for rank 193 alone and a conditional 459-event population.
+
+Rank 193's 1998-12-10 00:00 through 1998-12-13 00:00 UTC storm has upstream
+AORC nodata at the final hour. Native DSS readback found 1,681 missing watershed cells;
+a direct NOAA Zarr probe confirmed the missing source value. Rank 219's
+1986-11-07 00:00 through 1986-11-10 00:00 UTC storm has missing watershed values
+in 25 hourly records, from 1986-11-09 00:00 through 1986-11-10 00:00 UTC.
+Native readback found 150,725 missing cell-hour values; direct NOAA Zarr probes
+confirmed upstream nodata at an affected source location. Both target
+files contain 72 records and cover the watershed envelope. Repeating export
+with the same upstream data cannot fill these gaps; zero rainfall must not be
+substituted for missing data. These event exclusions are distinct from the nine
+excluded search starts requiring unavailable 2026 data.
+
+The decision is recorded in ``72hr-events/population-disposition.json``, linked
+as collection metadata. After export finished, both failed Items and their four
+DSS files were removed from the active collection and preserved under
+``_recovery/20260928-72hr/excluded-r193-r219/``. Before moving them, the
+``before-exclusion.zip`` backup was verified against a SHA-256 inventory of
+945 metadata/evidence/output files totaling 23,108,035 uncompressed bytes.
+Its SHA-256 is
+``0c87ffff679c0ba0ba743467ace12950d450c7db2c774cd13735be9a4b1c6959``.
+This is a same-disk recovery archive, not an independent backup.
+
+The finalized active population contains 458 source/target pairs (916 DSS
+assets), with original rank IDs and gaps at 193 and 219. The collection's
+``ranked_storms`` asset points to ``accepted-ranked-storms.csv``;
+``search-ranked-storms`` retains the original ``ranked-storms.csv``. Statistics,
+the original ranking, frozen creation/population settings, and search-coverage
+receipt remain byte-for-byte unchanged. No backfill, renumbering, or imputation
+was performed.
+
+Final reconciliation verified all 916 retained DSS checksums, four quarantined
+DSS checksums, 916 passing manifest rows with no orphaned DSS, and 458 Items in
+the collection and both geographic indexes. Native coverage evidence includes
+the separate readback audit for the eight retained initial pairs. All 1,841
+local collection/Item asset links resolve within the catalog with portable
+relative paths. Terminal status is ``complete_with_documented_exclusions`` in
+``_recovery/20260928-72hr/run-status.json``; the exclusion directory contains
+``disposition-receipt.json`` and ``catalog-link-verification.json``.
+
+Additional event failures require a separate disposition. These approvals apply
+only to the 72-hour population and do not constitute HMS/RAS engineering
+qualification or approval to adopt the new forcing in FloodForecast.
