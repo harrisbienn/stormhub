@@ -348,3 +348,15 @@ shorten those storms or edit frozen settings to hide the missing dates. Record
 the unavailable windows and an explicit operator disposition, or defer
 finalization until data is available. A ranking from fewer requested windows
 must retain that qualification even if it yields all 460 selected events.
+
+For this 72-hour recovery, the operator accepted those nine unavailable windows
+as exclusions on 2026-09-28. The accepted search population is 68,532 available
+windows out of the original 68,541 requested starts. The first excluded start
+is 2025-12-29 00:00 UTC, the last is 2025-12-31 00:00 UTC, and all nine are on
+the six-hour grid. Frozen creation/population settings and retained statistics
+remain unchanged. Catalog-local ``72hr-events/search-coverage.json`` records
+each excluded start/end, the upstream availability evidence, approval, and
+input/statistics hashes; expose it as a collection metadata asset when the
+recovered collection is finalized. Describe this as complete with documented
+exclusions, not complete coverage of the original request. This disposition
+does not automatically approve exclusions for the 24- or 48-hour searches.
