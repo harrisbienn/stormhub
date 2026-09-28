@@ -11,8 +11,8 @@ import numpy as np
 import s3fs
 import xarray as xr
 from affine import Affine
-from matplotlib import patches
-from matplotlib import pyplot as plt
+from matplotlib import colormaps, patches
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from pyproj import CRS
 from pystac import Asset, Item, MediaType
@@ -295,9 +295,13 @@ class AORCItem(Item):
             self._transposed_watershed, self._transposition_transform, self._stats = self.transpose.max_transpose(
                 self._create_stats
             )
-        fig, ax = plt.subplots(figsize=(5, 5))
+        # Workers may have no Windows desktop. Render directly without a GUI
+        # manager, and leave the caller's interactive plotting backend alone.
+        fig = Figure(figsize=(5, 5))
+        FigureCanvasAgg(fig)
+        ax = fig.subplots()
         fig.set_facecolor("w")
-        colormap = plt.get_cmap("Spectral_r")
+        colormap = colormaps["Spectral_r"]
         (self.sum_aorc["APCP_surface"] * MM_TO_INCH_CONVERSION_FACTOR).plot(
             ax=ax, cmap=colormap, cbar_kwargs={"label": "Accumulation (Inches)"}, vmin=0, vmax=scale_max
         )
@@ -336,7 +340,7 @@ class AORCItem(Item):
         if return_fig:
             return fig
         else:
-            plt.close()
+            fig.clear()
 
 
 def valid_spaces_item(watershed: Item, transposition_region: Item, storm_duration: int = 72) -> Polygon:

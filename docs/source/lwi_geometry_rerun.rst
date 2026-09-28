@@ -317,3 +317,34 @@ Keep ``configs/params-config.json`` for new creation and keep the catalog snapsh
 for existing-generation provenance and population. The runtime
 ``lwi-r3-config.json`` still binds prepared geometry paths/checksums. Historical
 ``lwi-region3/`` and its ZIP are unchanged by this migration.
+
+Recovering after discovery and Item-rendering failures
+-----------------------------------------------------
+
+A stopped process is not evidence of a complete catalog. Reconcile every
+expected search start against ``storm-stats.csv`` before accepting rankings,
+then check the selected ranks against actual Item JSON, thumbnails, and the
+collection's links. Empty numeric directories are failed attempts, not Items.
+The normal ``resume`` command deliberately refuses these directories.
+
+Hidden Windows workers previously attempted to create a Tk desktop window
+when rendering AORC thumbnails. Thumbnail generation now uses a Matplotlib Agg
+canvas directly, without changing the notebook's interactive backend. Check a
+real Item and representative DSS pair before rebuilding the remaining Items.
+
+Preserve statistics, rankings, catalog links, logs, and a checksum-complete
+backup before recovery. Once search coverage is reconciled, the package's
+``rebuild_ranked_collection_items`` API can regenerate Items from the retained
+statistics without repeating discovery; it quarantines existing numeric
+directories by default. Verify every intended Item before accepting the
+resulting collection or exporting its DSS. Keep the checkpoint-adoption receipt
+at the path referenced by ``population-settings.json``.
+
+The 72-hour search on 2026-09-27 retained 68,532 of 68,541 requested starts.
+The nine absent starts, 2025-12-29 00:00 through 2025-12-31 00:00 UTC at six-hour
+steps, require 2026 data. On 2026-09-28 NOAA's 2025 Zarr time axis ended at
+2025-12-31 23:00 UTC and the 2026 metadata returned HTTP 404. Do not silently
+shorten those storms or edit frozen settings to hide the missing dates. Record
+the unavailable windows and an explicit operator disposition, or defer
+finalization until data is available. A ranking from fewer requested windows
+must retain that qualification even if it yields all 460 selected events.
