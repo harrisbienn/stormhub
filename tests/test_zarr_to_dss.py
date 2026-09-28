@@ -1,20 +1,26 @@
 """Tests for staged AORC-to-DSS processing."""
 
 from datetime import datetime
+from types import SimpleNamespace
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-from pyproj import CRS
-from shapely.geometry import Point
+import pytest
+from pyproj import CRS, Transformer
+from shapely.geometry import Point, box
+from shapely.ops import transform
 import xarray as xr
 
 from stormhub.met.zarr_to_dss import (
     NOAADataVariable,
     calculate_shg_translation,
+    get_noaa_data_for_dss,
     noaa_zarr_to_dss,
     noaa_zarr_to_dss_products,
     prepare_noaa_variable_for_dss,
     reproject_to_shg,
+    required_source_footprint,
     remove_existing_dss_files,
     translate_shg_data,
     validate_dss_record_counts,
@@ -208,7 +214,8 @@ def test_dss_products_writes_source_and_target_from_one_retrieval(monkeypatch) -
     sentinel_clipped = object()
     translation = {"x_offset_m": 1000, "y_offset_m": -2000}
 
-    def fake_get(*args):
+    def fake_get(*args, **kwargs):
+        assert kwargs["required_geometry"].covers(Point(-92.4, 32.7))
         calls.append("get")
         return sentinel_dataset
 
@@ -248,7 +255,7 @@ def test_dss_products_writes_source_and_target_from_one_retrieval(monkeypatch) -
     )
     monkeypatch.setattr(
         "stormhub.met.zarr_to_dss.validate_dss_record_counts",
-        lambda *_args: {"status": "passed"},
+        lambda *_args, **_kwargs: {"status": "passed"},
     )
 
     result = noaa_zarr_to_dss_products(
@@ -271,3 +278,77 @@ def test_dss_products_writes_source_and_target_from_one_retrieval(monkeypatch) -
     assert result["x_offset_m"] == translation["x_offset_m"]
     assert result["spatial_validation"]["PRECIPITATION"]["status"] == "passed"
     assert result["dss_validation"]["target"]["status"] == "passed"
+
+
+def test_retrieval_includes_inverse_target_footprint(monkeypatch) -> None:
+    """Fetch real precipitation beyond the storm-placement boundary when required."""
+    to_wgs84 = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True).transform
+    target = transform(to_wgs84, box(150000, 960000, 440000, 1316000))
+    required = required_source_footprint(target, {"x_offset_m": 181000, "y_offset_m": -217000}, 5, 1)
+    original = transform(to_wgs84, box(-24000, 730000, 630000, 1546000))
+    assert not original.covers(required)
+    monkeypatch.setattr("stormhub.met.zarr_to_dss.gpd.read_file", lambda _: gpd.GeoDataFrame(geometry=[original], crs=4326))
+    captured = []
+
+    def retrieve(paths, geometry, start, end, variables):
+        captured.append(geometry.geometry.iloc[0])
+        return "dataset"
+
+    monkeypatch.setattr("stormhub.met.zarr_to_dss.get_s3_zarr_data", retrieve)
+    result = get_noaa_data_for_dss("domain.json", datetime(2020, 1, 1), {NOAADataVariable.APCP: 72}, required_geometry=required)
+    assert result == "dataset"
+    assert original.difference(captured[0]).area < 1e-12
+    assert required.difference(captured[0]).area < 1e-12
+    projected = transform(Transformer.from_crs(4326, 5070, always_xy=True).transform, required)
+    assert projected.bounds[0] < -31000 - 5000
+    assert projected.bounds[2] > 259000 + 5000
+
+
+def test_validation_rejects_nodata_hole_inside_watershed() -> None:
+    """A grid envelope and some preserved values cannot hide missing watershed cells."""
+    source = xr.DataArray(
+        np.ones((2, 3, 3)), dims=("time", "y", "x"),
+        coords={"time": pd.date_range("2020-01-01", periods=2, freq="h"), "y": [2500., 1500., 500.], "x": [500., 1500., 2500.]},
+    ).rio.write_crs("EPSG:5070")
+    source.values[0, 1, 1] = np.nan
+    target = translate_shg_data(source, 0, 0)
+    to_wgs84 = Transformer.from_crs(5070, 4326, always_xy=True).transform
+    watershed = transform(to_wgs84, box(100, 100, 2900, 2900))
+    result = validate_translated_shg_data(source, target, 0, 0, target_geometry=watershed)
+    assert result["target_geometry_covered"] is True
+    assert result["values_preserved"] is True
+    assert result["target_valid_data_covered"] is False
+    assert result["missing_watershed_cell_values"] == 1
+    assert result["status"] == "failed"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_dss_readback_checks_watershed_values(monkeypatch, missing) -> None:
+    """Accept zero precipitation but reject native DSS nodata within the watershed."""
+    from hecdss.gridded_data import NULL_INT
+
+    data = np.zeros((3, 3))
+    if missing:
+        data[1, 1] = NULL_INT
+    grid = SimpleNamespace(data=data, cellSize=1000, lowerLeftCellX=0, lowerLeftCellY=0,
+                           xCoordOfGridCellZero=0, yCoordOfGridCellZero=0, numberOfCellsX=3, numberOfCellsY=3)
+
+    class FakeDss:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_catalog(self):
+            return ["/SHG1K/TEST/PRECIPITATION/01JAN2020:0000/01JAN2020:0100/AORC/"]
+
+        def get(self, _path):
+            return grid
+
+    monkeypatch.setattr("stormhub.met.zarr_to_dss.HecDss", lambda _: FakeDss())
+    watershed = transform(Transformer.from_crs(5070, 4326, always_xy=True).transform, box(100, 100, 2900, 2900))
+    result = validate_dss_record_counts("test.dss", {NOAADataVariable.APCP: 1}, target_geometry=watershed)
+    assert result["actual_records"] == {"PRECIPITATION": 1}
+    assert result["target_coverage_failed_records"] == int(missing)
+    assert result["status"] == ("failed" if missing else "passed")

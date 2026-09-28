@@ -12,7 +12,9 @@ from pandas import Timestamp
 import geopandas as gpd
 from geopandas import GeoDataFrame
 from pyproj import Transformer
+from rasterio.features import geometry_mask
 import s3fs
+from shapely.affinity import translate as translate_geometry
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
@@ -476,6 +478,28 @@ def clip_shg_data_to_geometry(
     return data.rio.clip([mapping(target_shg)], crs=SHG_WKT, drop=True, all_touched=True)
 
 
+def required_source_footprint(
+    target_geometry: BaseGeometry,
+    translation: dict,
+    target_buffer_km: float,
+    output_resolution_km: int,
+) -> BaseGeometry:
+    """Return the WGS84 retrieval footprint needed for a translated target.
+
+    A valid storm-placement domain is not a precipitation coverage boundary.
+    Invert the actual snapped translation, including the target buffer and two
+    output cells of padding for spatial selection and nearest-cell reprojection.
+    """
+    target_shg = project_geometry_to_shg(target_geometry).buffer(
+        (target_buffer_km + 2 * output_resolution_km) * KM_TO_M_CONVERSION_FACTOR
+    )
+    source_shg = translate_geometry(
+        target_shg, xoff=-translation["x_offset_m"], yoff=-translation["y_offset_m"]
+    )
+    transformer = Transformer.from_crs(SHG_WKT, "EPSG:4326", always_xy=True)
+    return transform_geometry(transformer.transform, source_shg)
+
+
 def validate_translated_shg_data(
     source_data: xr.DataArray,
     target_data: xr.DataArray,
@@ -507,6 +531,8 @@ def validate_translated_shg_data(
     target_bounds = tuple(float(value) for value in target_data.rio.bounds())
     target_geometry_bounds = None
     target_geometry_covered = True
+    target_valid_data_covered = True
+    missing_watershed_cell_values = 0
     if target_geometry is not None:
         target_geometry_bounds = tuple(
             float(value) for value in project_geometry_to_shg(target_geometry).bounds
@@ -517,11 +543,26 @@ def validate_translated_shg_data(
             and target_bounds[2] >= target_geometry_bounds[2]
             and target_bounds[3] >= target_geometry_bounds[3]
         )
-    passed = values_match and target_geometry_covered
+        watershed_cells = geometry_mask(
+            [mapping(project_geometry_to_shg(target_geometry))],
+            out_shape=(target_data.sizes[y_dim], target_data.sizes[x_dim]),
+            transform=target_data.rio.transform(recalc=True),
+            all_touched=True,
+            invert=True,
+        )
+        values = target_data.transpose(..., y_dim, x_dim).to_numpy()
+        valid_values = np.isfinite(values)
+        if target_data.rio.nodata is not None:
+            valid_values &= values != target_data.rio.nodata
+        missing_watershed_cell_values = int((~valid_values & watershed_cells).sum())
+        target_valid_data_covered = bool(watershed_cells.any()) and missing_watershed_cell_values == 0
+    passed = values_match and target_geometry_covered and target_valid_data_covered
     return {
         "status": "passed" if passed else "failed",
         "values_preserved": values_match,
         "target_geometry_covered": target_geometry_covered,
+        "target_valid_data_covered": target_valid_data_covered,
+        "missing_watershed_cell_values": missing_watershed_cell_values,
         "source_time_steps": int(source_data.sizes.get("time", 0)),
         "target_time_steps": int(target_data.sizes.get("time", 0)),
         "target_rows": int(target_data.sizes[y_dim]),
@@ -535,14 +576,19 @@ def validate_translated_shg_data(
 def validate_dss_record_counts(
     dss_path: str,
     variable_duration_map: Dict[NOAADataVariable, int],
+    *,
+    target_geometry: BaseGeometry = None,
 ) -> dict:
-    """Reopen a DSS file and verify record counts for each requested variable."""
+    """Verify record counts and, when requested, actual target-grid coverage."""
     expected = {
         variable.dss_variable_title.upper(): int(duration)
         for variable, duration in variable_duration_map.items()
     }
     actual = {variable: 0 for variable in expected}
     unexpected_records = 0
+    coverage_failures = 0
+    missing_watershed_cell_values = 0
+    watershed_shg = project_geometry_to_shg(target_geometry) if target_geometry is not None else None
 
     try:
         with HecDss(dss_path) as dss:
@@ -554,6 +600,26 @@ def validate_dss_record_counts(
                 variable = parts[2].upper()
                 if variable in actual:
                     actual[variable] += 1
+                    if watershed_shg is not None:
+                        grid = dss.get(str(path_obj))
+                        left = grid.xCoordOfGridCellZero + grid.lowerLeftCellX * grid.cellSize
+                        bottom = grid.yCoordOfGridCellZero + grid.lowerLeftCellY * grid.cellSize
+                        right = left + grid.numberOfCellsX * grid.cellSize
+                        top = bottom + grid.numberOfCellsY * grid.cellSize
+                        bounds = watershed_shg.bounds
+                        covered = left <= bounds[0] and bottom <= bounds[1] and right >= bounds[2] and top >= bounds[3]
+                        cells = geometry_mask(
+                            [mapping(watershed_shg)], out_shape=grid.data.shape,
+                            transform=Affine(grid.cellSize, 0, left, 0, grid.cellSize, bottom),
+                            all_touched=True, invert=True,
+                        )
+                        # hecdss stores absent values with NULL_INT; zero is valid rain.
+                        invalid = ~np.isfinite(grid.data) | (grid.data == gridded_data.NULL_INT)
+                        if variable == NOAADataVariable.APCP.dss_variable_title:
+                            invalid |= grid.data < 0
+                        missing = int((invalid & cells).sum())
+                        missing_watershed_cell_values += missing
+                        coverage_failures += int(not covered or not cells.any() or missing > 0)
                 else:
                     unexpected_records += 1
     except Exception as exc:
@@ -565,12 +631,15 @@ def validate_dss_record_counts(
             "error": str(exc),
         }
 
-    passed = actual == expected and unexpected_records == 0
+    passed = actual == expected and unexpected_records == 0 and coverage_failures == 0
     return {
         "status": "passed" if passed else "failed",
         "expected_records": expected,
         "actual_records": actual,
         "unexpected_records": unexpected_records,
+        "target_coverage_checked": target_geometry is not None,
+        "target_coverage_failed_records": coverage_failures,
+        "missing_watershed_cell_values": missing_watershed_cell_values,
     }
 
 
@@ -662,6 +731,8 @@ def get_noaa_data_for_dss(
     aoi_geometry_path: str,
     storm_start: datetime,
     variable_duration_map: Dict[NOAADataVariable, int],
+    *,
+    required_geometry: BaseGeometry = None,
 ) -> xr.Dataset:
     """Retrieve the AORC subset required for a DSS event export."""
     all_variables = list(variable_duration_map.keys())
@@ -669,6 +740,11 @@ def get_noaa_data_for_dss(
     max_end = storm_start + timedelta(hours=max(variable_duration_map.values()))
     aorc_paths = get_aorc_paths(min_start, max_end)
     aoi_gdf = gpd.read_file(aoi_geometry_path)
+    if required_geometry is not None:
+        aoi_gdf = aoi_gdf.to_crs("EPSG:4326")
+        aoi_gdf = GeoDataFrame(
+            geometry=[aoi_gdf.geometry.iloc[0].union(required_geometry)], crs="EPSG:4326"
+        )
     voi_keys = [variable.value for variable in all_variables]
 
     logging.info("Getting AORC data")
@@ -730,7 +806,19 @@ def noaa_zarr_to_dss_products(
         translation = calculate_shg_translation(source_geometry, target_geometry, output_resolution_km)
 
     spatial_validation = {}
-    aorc_data = get_noaa_data_for_dss(aoi_geometry_path, storm_start, variable_duration_map)
+    retrieval_options = {}
+    if translation is not None:
+        retrieval_options["required_geometry"] = required_source_footprint(
+            target_geometry, translation, target_buffer_km, output_resolution_km
+        )
+        translation["source_retrieval"] = {
+            "method": "configured-aoi-union-inverse-target-footprint",
+            "required_bounds_wgs84": list(retrieval_options["required_geometry"].bounds),
+            "reprojection_padding_m": 2 * output_resolution_km * KM_TO_M_CONVERSION_FACTOR,
+        }
+    aorc_data = get_noaa_data_for_dss(
+        aoi_geometry_path, storm_start, variable_duration_map, **retrieval_options
+    )
     remove_existing_dss_files(list(output_dss_paths.values()))
     for data_variable, duration in variable_duration_map.items():
         source_data = prepare_noaa_variable_for_dss(aorc_data, data_variable, storm_start, duration)
@@ -781,7 +869,9 @@ def noaa_zarr_to_dss_products(
             )
 
     dss_validation = {
-        role: validate_dss_record_counts(path, variable_duration_map)
+        role: validate_dss_record_counts(
+            path, variable_duration_map, target_geometry=target_geometry if role == "target" else None
+        )
         for role, path in output_dss_paths.items()
     }
     if translation is None:

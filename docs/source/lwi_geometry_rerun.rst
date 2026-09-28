@@ -360,3 +360,35 @@ input/statistics hashes; expose it as a collection metadata asset when the
 recovered collection is finalized. Describe this as complete with documented
 exclusions, not complete coverage of the original request. This disposition
 does not automatically approve exclusions for the 24- or 48-hour searches.
+
+Target precipitation coverage at placement-domain edges
+-------------------------------------------------------
+
+The valid transposition region limits storm placement; it must not truncate
+the precipitation needed to fill a target watershed. The initial 72-hour DSS
+batch exposed this at ranks 5 and 16, whose translated target grids stopped
+about 4.47 km short of the western watershed bound.
+
+For target exports, retrieval now includes the inverse-translated target
+footprint, its configured buffer, and two output-grid cells of padding for
+spatial selection/reprojection, in addition to the configured retrieval AOI.
+The inverse uses the same snapped SHG translation applied to the data. Search
+statistics, ranks, storm-placement geometry, and translation offsets are
+unchanged. The enlarged precipitation footprint may change the source grid
+extent and reprojection alignment; preserve and replace the complete affected
+source/target pair together so its source-to-target evidence stays consistent.
+
+Spatial validation requires finite, non-nodata values in every raster cell
+touching the watershed at every timestep, as well as envelope coverage and
+preserved source values. A bounding box alone cannot establish coverage.
+Back up affected outputs and metadata before explicit replacement; retain
+already accepted pairs only after checking their actual watershed coverage.
+
+Readback of all 72 records in each of the first 20 targets found affected ranks
+3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 16, and 17. The other eight pairs are retained.
+Export validation now also checks the actual reopened DSS grids using their
+stored origin and cell size; finite watershed coverage is required after
+serialization as well as before writing. Zero rainfall remains valid data.
+The 12 affected pairs and their previous metadata are preserved in the local
+coverage-repair backup before selective replacement. Subsequent exports record
+the enlarged retrieval method and padding in their validation evidence.
