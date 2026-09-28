@@ -392,3 +392,23 @@ serialization as well as before writing. Zero rainfall remains valid data.
 The 12 affected pairs and their previous metadata are preserved in the local
 coverage-repair backup before selective replacement. Subsequent exports record
 the enlarged retrieval method and padding in their validation evidence.
+
+Approved 72-hour event-population exclusion
+------------------------------------------
+
+On 2026-09-28 the operator approved excluding original rank 193 and accepting
+a 459-event 72-hour population, subject to validation of the other events.
+Its 1998-12-10 00:00 through 1998-12-13 00:00 UTC storm has upstream AORC nodata
+at the final hour. Native DSS readback found 1,681 missing watershed cells;
+a direct NOAA Zarr probe confirmed the missing source value. This is distinct
+from the nine excluded search starts requiring unavailable 2026 data.
+
+Record this decision in ``72hr-events/population-disposition.json``. Retain the
+failed Item, both DSS files, and validation/upstream evidence in the recovery
+archive; remove the event from the active collection only after export writers
+finish. Keep original rank IDs with the gap at 193, preserve the original
+statistics/ranking table and frozen settings, and publish the accepted ranking
+subset separately. The accepted population is 459 source/target pairs (918
+DSS assets), with no automatic backfill, renumbering, or imputation. Additional
+event failures require a separate disposition. This population-count approval
+does not constitute HMS/RAS engineering qualification.
