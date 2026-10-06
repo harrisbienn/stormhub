@@ -1,5 +1,5 @@
 LWI Region 3 geometry rerun
-==========================
+===========================
 
 Preparation recorded on 2026-09-24. Generation is tracked by
 `StormHub #15 <https://github.com/harrisbienn/stormhub/issues/15>`_; adoption is
@@ -15,7 +15,7 @@ Engineering review of the prepared footprint and derived valid transposition
 region remains part of the pre-search workflow.
 
 Supplied HUC8 inputs
--------------------
+--------------------
 
 The configured inputs are Esri JSON, not GeoJSON despite the ``.json`` suffix:
 
@@ -82,7 +82,7 @@ restore location, and checksum results under the integration issue. Do not
 extract the archive over either the historical catalog or the new generation.
 
 Prepare the new catalog and inputs
----------------------------------
+----------------------------------
 
 Use the StormHub scientific environment with its native ``hecdss`` dependency.
 The portable CI environment alone does not qualify the full GIS/DSS workflow.
@@ -114,7 +114,7 @@ The resulting layout should keep independent generations::
      lwi-region3-geometry-v2/              # configured new generation
 
 Freeze settings and rerun discovery
-----------------------------------
+-----------------------------------
 
 ``configs/params-config.json`` supplies creation with these settings; its frozen
 ``catalogs/lwi-region3-geometry-v2/creation-settings.json`` snapshot supplies
@@ -195,7 +195,7 @@ search changes rankings after Items were created, reconcile/rebuild those new
 Items before export; never let stale rank-addressed folders select old events.
 
 Validate and export DSS
-----------------------
+-----------------------
 
 After completing and reviewing a duration's population:
 
@@ -268,7 +268,7 @@ library generation. Component PRs track the parent; only the final accepted
 integration PR closes FloodForecast #105.
 
 Wiring validation on 2026-09-25
------------------------------
+-------------------------------
 
 Offline execution of the notebook preparation cells against the supplied files
 passed source hash verification, WGS84 polygon preparation, climate coverage,
@@ -287,7 +287,7 @@ validated by these offline checks. The local environment has no Sphinx; run
 environment to check rendered documentation.
 
 Notebook refactor validation on 2026-09-25
-----------------------------------------
+------------------------------------------
 
 Reusable creation logic now lives in ``stormhub.met.catalog_setup``. The
 notebook keeps configuration, inspection displays, package calls, and the
@@ -319,7 +319,7 @@ for existing-generation provenance and population. The runtime
 ``lwi-region3/`` and its ZIP are unchanged by this migration.
 
 Recovering after discovery and Item-rendering failures
------------------------------------------------------
+------------------------------------------------------
 
 A stopped process is not evidence of a complete catalog. Reconcile every
 expected search start against ``storm-stats.csv`` before accepting rankings,
@@ -394,7 +394,10 @@ coverage-repair backup before selective replacement. Subsequent exports record
 the enlarged retrieval method and padding in their validation evidence.
 
 Approved 72-hour event-population exclusions
--------------------------------------------
+--------------------------------------------
+
+This section records the 2026-09-28 disposition. The authorized backfills below
+supersede its 458-event count and no-backfill restriction; the exclusions remain.
 
 On 2026-09-28 the operator approved excluding original ranks 193 and 219 and
 accepting a 458-event 72-hour population. This supersedes the earlier approval
@@ -442,3 +445,43 @@ relative paths. Terminal status is ``complete_with_documented_exclusions`` in
 Additional event failures require a separate disposition. These approvals apply
 only to the 72-hour population and do not constitute HMS/RAS engineering
 qualification or approval to adopt the new forcing in FloodForecast.
+
+Validated backfills and current population
+------------------------------------------
+
+On 2026-10-02 the operator authorized selecting the top 460 temporally filtered
+24- and 48-hour candidates without a rainfall cutoff, and backfilling the two
+excluded 72-hour events. The original search statistics, threshold-based
+rankings, and frozen population settings remain preserved. Effective selection
+is recorded in each collection's ``selection-disposition.json`` and linked
+``ranked_storms`` asset. The 72-hour population includes ranks 461 and 462,
+retaining gaps at excluded ranks 193 and 219.
+
+On 2026-10-05 the operator authorized replacing failed 48-hour rank 210 with the
+next eligible candidate. Rank 210 (1986-11-07 through 1986-11-09 UTC) contained
+48 records but had 6,947 missing watershed cells in one record. Rank 461,
+2011-05-19 06:00 through 2011-05-21 06:00 UTC, passed source record validation
+and native target readback with all 48 records and zero missing watershed
+cells. Original rank IDs are retained; 461 is not relabeled as 210.
+
+The failed Item, validation evidence, and DSS pair are preserved under
+``_runs/20261005-48hr-backfill/excluded-210/``. The neighboring
+``before-replacement/`` archive was verified against a file-size and SHA-256
+inventory before moving the failed assets. All other 918 active 48-hour DSS
+files were verified unchanged. The collection links, selected ranking,
+geographic indexes, selection disposition, and DSS manifest were regenerated.
+Reconciliation records 460 passing pairs, 920 manifest rows, and no orphan DSS.
+
+The active catalog now contains 460 validated target events per duration.
+The refreshed zonal analysis is under
+``_analysis/20261005-target-zonal-backfilled/``; its CSV dataset and workbook
+supersede the earlier analysis containing failed 48-hour rank 210. Retain the
+earlier analysis as historical evidence. Downstream consumers should resolve
+Items and checksums from the current collection/manifest rather than assume
+rank IDs are contiguous or reuse an old exported inventory.
+
+Backfilling does not fill missing search windows requiring unavailable 2026
+AORC data. The 24- and 48-hour search receipts retain those coverage
+qualifications. DSS validation and zonal completeness do not constitute
+HMS/RAS engineering acceptance or authorize changing FloodForecast model or
+campaign bindings.
