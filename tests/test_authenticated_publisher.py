@@ -226,7 +226,7 @@ def test_publisher_fails_closed_on_changed_or_duplicate_content(tmp_path: Path) 
 
 def test_long_reference_and_asset_paths_remain_authenticated_and_portable(tmp_path: Path) -> None:
     """Read long native paths while keeping device prefixes out of STAC links."""
-    from stormhub.publishing import _local_io_path
+    from stormhub.publishing import _local_io_path, _publication_href
 
     catalog = _catalog(tmp_path)
     publication, _ = _publication(tmp_path)
@@ -245,6 +245,10 @@ def test_long_reference_and_asset_paths_remain_authenticated_and_portable(tmp_pa
     )
     publication = replace(publication, assets=assets)
     assert len(str(asset)) > 260
+    # Path.resolve may return a device-prefixed UNC mount only for the long
+    # asset, while the shorter Item path resolves to the ordinary mount.
+    relative = _publication_href(str(_local_io_path(asset)), manifest, tmp_path / "catalog/item.json")
+    assert "?" not in relative and not Path(relative).is_absolute()
     item = publish_authenticated_item(catalog, publication, reference_path=manifest)
     saved = pystac.Item.from_file(item.get_self_href())
     for projected in saved.assets.values():

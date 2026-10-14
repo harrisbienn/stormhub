@@ -47,8 +47,8 @@ def _path_component(value: str, name: str) -> str:
 
 def _confined_path(path: Path, catalog_dir: Path) -> Path:
     """Resolve existing symlinks/junctions and constrain publication writes."""
-    resolved = path.resolve()
-    if not resolved.is_relative_to(catalog_dir.resolve()):
+    resolved = _ordinary_local_path(path.resolve())
+    if not resolved.is_relative_to(_ordinary_local_path(catalog_dir.resolve())):
         raise ValueError("Publication destination must remain inside the catalog directory")
     # Keep a mapped-drive namespace for PySTAC 1.x, which cannot reliably
     # reload relative catalog links rooted at a UNC host. Validation above
@@ -71,14 +71,22 @@ def _local_io_path(path: Path) -> Path:
     return Path("\\\\?\\UNC\\" + value[2:] if value.startswith("\\\\") else "\\\\?\\" + value)
 
 
+def _ordinary_local_path(path: Path) -> Path:
+    """Normalize optional device prefixes returned by Windows path resolution."""
+    value = str(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + value[8:])
+    return Path(value[4:]) if value.startswith("\\\\?\\") else path
+
+
 def _resolve_href(href: str, reference_path: Path) -> str:
     """Resolve a reference-relative href while preserving remote IRIs."""
     if _is_remote_href(href):
         return href
     candidate = Path(href)
     if candidate.is_absolute():
-        return str(candidate.resolve())
-    return str((reference_path.parent / candidate).resolve())
+        return str(_ordinary_local_path(candidate.resolve()))
+    return str(_ordinary_local_path((reference_path.parent / candidate).resolve()))
 
 
 def _publication_href(href: str, reference_path: Path, item_path: Path) -> str:
@@ -87,7 +95,7 @@ def _publication_href(href: str, reference_path: Path, item_path: Path) -> str:
     if _is_remote_href(resolved):
         return resolved
     try:
-        relative = os.path.relpath(resolved, start=item_path.parent.resolve())
+        relative = os.path.relpath(resolved, start=_ordinary_local_path(item_path.parent.resolve()))
     except ValueError as exc:
         raise ValueError(f"Cannot publish href relative to STAC Item: {href}") from exc
     return Path(relative).as_posix()
