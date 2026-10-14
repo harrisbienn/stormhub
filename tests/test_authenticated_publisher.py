@@ -75,6 +75,17 @@ def test_generated_destinations_reject_directory_link_escape(tmp_path, boundary)
     assert catalog_path.read_bytes() == before
 
 
+def test_confined_path_preserves_safe_logical_namespace(tmp_path):
+    """Validate resolved targets while retaining the caller's path namespace."""
+    from stormhub.publishing import _confined_path
+
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    _directory_link(alias, target)
+    assert _confined_path(alias / "item.json", tmp_path) == alias.absolute() / "item.json"
+
+
 def test_existing_collection_cannot_redirect_writes_outside_catalog(tmp_path):
     """A cached collection's self href is a write destination too."""
     catalog = _catalog(tmp_path)
@@ -253,6 +264,16 @@ def test_unc_collection_href_keeps_the_network_host(tmp_path: Path) -> None:
     item = authenticated_item_to_stac(publication, reference_path=manifest, item_path=tmp_path / "item.json")
     collection = _new_collection(publication, item, PureWindowsPath("//server/share/catalog/collection.json"))
     assert collection.get_self_href() == "//server/share/catalog/collection.json"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows mapped-drive boundary")
+def test_unc_catalog_refuses_before_any_filesystem_write(tmp_path):
+    """Reject PySTAC 1.x's unsupported UNC reload boundary explicitly."""
+    catalog = pystac.Catalog(id="unc", description="UNC test")
+    catalog.set_self_href("//server/share/catalog/catalog.json")
+    publication, manifest = _publication(tmp_path)
+    with pytest.raises(ValueError, match="mapped drive"):
+        publish_authenticated_item(catalog, publication, reference_path=manifest)
 
 
 def test_publication_request_rejects_ambiguous_asset_identity(tmp_path: Path) -> None:

@@ -76,9 +76,12 @@ serialized STAC hrefs stay relative. Supply ordinary absolute paths to the API;
 Windows device prefixes belong only at native file-I/O boundaries. Keep catalog
 and Item destinations short enough for PySTAC's own filesystem I/O. This does
 not change immutable Item rejection or concurrent/interrupted index semantics.
-The publisher passes UNC Item/Collection hrefs to PySTAC with forward slashes
-so the network host is preserved. Callers must likewise use `Path.as_posix()`
-when creating or loading a UNC catalog with PySTAC.
+Use a mapped drive for Windows network catalogs. The publisher preserves that
+logical namespace while checking physical resolved containment and reading long
+asset paths. PySTAC 1.x cannot reliably reload relative links rooted at a UNC
+host, so direct UNC catalog publication fails explicitly before writing. Native
+asset reads still support UNC paths. Callers must preserve the mapped-drive
+catalog path instead of resolving it to UNC before invoking the publisher.
 
 Publication IDs must be single portable filename components: Windows device names,
 drive/stream syntax, control characters, and leading/trailing whitespace or trailing

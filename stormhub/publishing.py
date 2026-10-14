@@ -48,9 +48,12 @@ def _path_component(value: str, name: str) -> str:
 def _confined_path(path: Path, catalog_dir: Path) -> Path:
     """Resolve existing symlinks/junctions and constrain publication writes."""
     resolved = path.resolve()
-    if not resolved.is_relative_to(catalog_dir):
+    if not resolved.is_relative_to(catalog_dir.resolve()):
         raise ValueError("Publication destination must remain inside the catalog directory")
-    return resolved
+    # Keep a mapped-drive namespace for PySTAC 1.x, which cannot reliably
+    # reload relative catalog links rooted at a UNC host. Validation above
+    # still uses physical resolved paths, including junction targets.
+    return path.absolute()
 
 
 def _is_remote_href(href: str) -> bool:
@@ -240,7 +243,7 @@ def authenticated_item_to_stac(
 ) -> pystac.Item:
     """Project a caller-owned publication request into a portable STAC Item."""
     reference = Path(reference_path).resolve()
-    output = Path(item_path).resolve()
+    output = Path(item_path).absolute()
     if not _local_io_path(reference).is_file():
         raise ValueError(f"Publication reference file does not exist: {reference}")
     if verify_files:
@@ -329,11 +332,13 @@ def publish_authenticated_item(
     catalog_href = catalog.get_self_href()
     if catalog_href is None or _is_remote_href(catalog_href):
         raise ValueError("Publishing requires a saved local STAC Catalog")
-    catalog_dir = Path(catalog_href).resolve().parent
+    catalog_dir = Path(catalog_href).absolute().parent
+    if os.name == "nt" and catalog_dir.drive.startswith("\\\\"):
+        raise ValueError("PySTAC catalog publication requires a mapped drive path on Windows, not a UNC root")
     collection_dir = _confined_path(catalog_dir / publication.collection_id, catalog_dir)
     collection_path = _confined_path(collection_dir / "collection.json", catalog_dir)
     output = (
-        Path(item_path).resolve()
+        Path(item_path).absolute()
         if item_path is not None
         else _confined_path(collection_dir / publication.item_id / f"{publication.item_id}.json", catalog_dir)
     )
