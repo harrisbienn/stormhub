@@ -213,6 +213,38 @@ def test_publisher_fails_closed_on_changed_or_duplicate_content(tmp_path: Path) 
         publish_authenticated_item(catalog, publication, reference_path=manifest)
 
 
+def test_long_reference_and_asset_paths_remain_authenticated_and_portable(tmp_path: Path) -> None:
+    """Read long native paths while keeping device prefixes out of STAC links."""
+    from stormhub.publishing import _local_io_path
+
+    catalog = _catalog(tmp_path)
+    publication, _ = _publication(tmp_path)
+    deep = tmp_path / ("long-evidence-" * 5) / ("retained-output-" * 5) / ("nested-" * 8)
+    native = _local_io_path(deep)
+    native.mkdir(parents=True)
+    manifest = deep / "response.json"
+    _local_io_path(manifest).write_bytes(b"immutable response")
+    asset = deep / "result.hdf"
+    _local_io_path(asset).write_bytes(b"authenticated hydraulic output")
+    assets = tuple(
+        AuthenticatedAsset(
+            key=key, href=str(path), sha256=hashlib.sha256(_local_io_path(path).read_bytes()).hexdigest(),
+            size_bytes=_local_io_path(path).stat().st_size, media_type="application/octet-stream", roles=("data",),
+        ) for key, path in (("manifest", manifest), ("result", asset))
+    )
+    publication = replace(publication, assets=assets)
+    assert len(str(asset)) > 260
+    item = publish_authenticated_item(catalog, publication, reference_path=manifest)
+    saved = pystac.Item.from_file(item.get_self_href())
+    for projected in saved.assets.values():
+        assert "?" not in projected.href and not Path(projected.href).is_absolute()
+        resolved = (Path(item.get_self_href()).parent / projected.href).resolve()
+        assert _local_io_path(resolved).is_file()
+    _local_io_path(asset).write_bytes(b"changed bytes")
+    with pytest.raises(ValueError, match="Size mismatch|Checksum mismatch"):
+        publish_authenticated_item(catalog, replace(publication, item_id="changed"), reference_path=manifest)
+
+
 def test_publication_request_rejects_ambiguous_asset_identity(tmp_path: Path) -> None:
     """Reject duplicate asset keys and caller overrides of file identity."""
     publication, _ = _publication(tmp_path)

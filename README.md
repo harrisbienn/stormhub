@@ -71,6 +71,12 @@ geometry, temporal extent, searchable properties, relationships, and
 checksum-pinned assets. StormHub verifies local bytes and writes a portable
 STAC tree without importing or reinterpreting the caller's domain contract.
 
+On Windows, local reference and asset reads support extended-length paths while
+serialized STAC hrefs stay relative. Supply ordinary absolute paths to the API;
+Windows device prefixes belong only at native file-I/O boundaries. Keep catalog
+and Item destinations short enough for PySTAC's own filesystem I/O. This does
+not change immutable Item rejection or concurrent/interrupted index semantics.
+
 Publication IDs must be single portable filename components: Windows device names,
 drive/stream syntax, control characters, and leading/trailing whitespace or trailing
 dots are rejected. Generated destinations and existing Collection write paths must

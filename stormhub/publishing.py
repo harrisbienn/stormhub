@@ -60,6 +60,14 @@ def _is_remote_href(href: str) -> bool:
     return bool(urlsplit(href).scheme)
 
 
+def _local_io_path(path: Path) -> Path:
+    """Use extended Windows paths only for native file reads, never STAC hrefs."""
+    value = str(path.absolute())
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return path
+    return Path("\\\\?\\UNC\\" + value[2:] if value.startswith("\\\\") else "\\\\?\\" + value)
+
+
 def _resolve_href(href: str, reference_path: Path) -> str:
     """Resolve a reference-relative href while preserving remote IRIs."""
     if _is_remote_href(href):
@@ -187,7 +195,7 @@ def _verify_asset(asset: AuthenticatedAsset, reference_path: Path) -> None:
     resolved = _resolve_href(asset.href, reference_path)
     if _is_remote_href(resolved):
         return
-    path = Path(resolved)
+    path = _local_io_path(Path(resolved))
     if not path.is_file():
         raise ValueError(f"Authenticated asset {asset.key!r} does not exist: {path}")
     if path.stat().st_size != asset.size_bytes:
@@ -233,7 +241,7 @@ def authenticated_item_to_stac(
     """Project a caller-owned publication request into a portable STAC Item."""
     reference = Path(reference_path).resolve()
     output = Path(item_path).resolve()
-    if not reference.is_file():
+    if not _local_io_path(reference).is_file():
         raise ValueError(f"Publication reference file does not exist: {reference}")
     if verify_files:
         for asset in publication.assets:
