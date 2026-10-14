@@ -256,7 +256,9 @@ def authenticated_item_to_stac(
         end_datetime=publication.end_datetime,
         collection=publication.collection_id,
     )
-    item.set_self_href(str(output))
+    # PySTAC 1.x collapses a double backslash into one slash; use POSIX form
+    # so a Windows UNC host remains //host/share rather than /host/share.
+    item.set_self_href(output.as_posix())
     FileExtension.add_to(item)
     _declare_extensions(item, publication.assets)
     for link in publication.links:
@@ -284,7 +286,7 @@ def _new_collection(publication: AuthenticatedItemPublication, item: pystac.Item
         extent=extent,
         license=publication.license,
     )
-    collection.set_self_href(str(path))
+    collection.set_self_href(path.as_posix())
     return collection
 
 

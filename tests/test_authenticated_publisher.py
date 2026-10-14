@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pystac
 import pytest
@@ -243,6 +243,16 @@ def test_long_reference_and_asset_paths_remain_authenticated_and_portable(tmp_pa
     _local_io_path(asset).write_bytes(b"changed bytes")
     with pytest.raises(ValueError, match="Size mismatch|Checksum mismatch"):
         publish_authenticated_item(catalog, replace(publication, item_id="changed"), reference_path=manifest)
+
+
+def test_unc_collection_href_keeps_the_network_host(tmp_path: Path) -> None:
+    """A UNC catalog path must never collapse to a local drive-root path."""
+    from stormhub.publishing import _new_collection, authenticated_item_to_stac
+
+    publication, manifest = _publication(tmp_path)
+    item = authenticated_item_to_stac(publication, reference_path=manifest, item_path=tmp_path / "item.json")
+    collection = _new_collection(publication, item, PureWindowsPath("//server/share/catalog/collection.json"))
+    assert collection.get_self_href() == "//server/share/catalog/collection.json"
 
 
 def test_publication_request_rejects_ambiguous_asset_identity(tmp_path: Path) -> None:
