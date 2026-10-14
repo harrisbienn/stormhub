@@ -47,10 +47,13 @@ def _path_component(value: str, name: str) -> str:
 
 def _confined_path(path: Path, catalog_dir: Path) -> Path:
     """Resolve existing symlinks/junctions and constrain publication writes."""
-    resolved = path.resolve()
-    if not resolved.is_relative_to(catalog_dir):
+    resolved = _ordinary_local_path(path.resolve())
+    if not resolved.is_relative_to(_ordinary_local_path(catalog_dir.resolve())):
         raise ValueError("Publication destination must remain inside the catalog directory")
-    return resolved
+    # Keep a mapped-drive namespace for PySTAC 1.x, which cannot reliably
+    # reload relative catalog links rooted at a UNC host. Validation above
+    # still uses physical resolved paths, including junction targets.
+    return path.absolute()
 
 
 def _is_remote_href(href: str) -> bool:
@@ -60,14 +63,30 @@ def _is_remote_href(href: str) -> bool:
     return bool(urlsplit(href).scheme)
 
 
+def _local_io_path(path: Path) -> Path:
+    """Use extended Windows paths only for native file reads, never STAC hrefs."""
+    value = str(path.absolute())
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return path
+    return Path("\\\\?\\UNC\\" + value[2:] if value.startswith("\\\\") else "\\\\?\\" + value)
+
+
+def _ordinary_local_path(path: Path) -> Path:
+    """Normalize optional device prefixes returned by Windows path resolution."""
+    value = str(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + value[8:])
+    return Path(value[4:]) if value.startswith("\\\\?\\") else path
+
+
 def _resolve_href(href: str, reference_path: Path) -> str:
     """Resolve a reference-relative href while preserving remote IRIs."""
     if _is_remote_href(href):
         return href
     candidate = Path(href)
     if candidate.is_absolute():
-        return str(candidate.resolve())
-    return str((reference_path.parent / candidate).resolve())
+        return str(_ordinary_local_path(candidate.resolve()))
+    return str(_ordinary_local_path((reference_path.parent / candidate).resolve()))
 
 
 def _publication_href(href: str, reference_path: Path, item_path: Path) -> str:
@@ -76,7 +95,7 @@ def _publication_href(href: str, reference_path: Path, item_path: Path) -> str:
     if _is_remote_href(resolved):
         return resolved
     try:
-        relative = os.path.relpath(resolved, start=item_path.parent.resolve())
+        relative = os.path.relpath(resolved, start=_ordinary_local_path(item_path.parent.resolve()))
     except ValueError as exc:
         raise ValueError(f"Cannot publish href relative to STAC Item: {href}") from exc
     return Path(relative).as_posix()
@@ -187,7 +206,7 @@ def _verify_asset(asset: AuthenticatedAsset, reference_path: Path) -> None:
     resolved = _resolve_href(asset.href, reference_path)
     if _is_remote_href(resolved):
         return
-    path = Path(resolved)
+    path = _local_io_path(Path(resolved))
     if not path.is_file():
         raise ValueError(f"Authenticated asset {asset.key!r} does not exist: {path}")
     if path.stat().st_size != asset.size_bytes:
@@ -232,8 +251,8 @@ def authenticated_item_to_stac(
 ) -> pystac.Item:
     """Project a caller-owned publication request into a portable STAC Item."""
     reference = Path(reference_path).resolve()
-    output = Path(item_path).resolve()
-    if not reference.is_file():
+    output = Path(item_path).absolute()
+    if not _local_io_path(reference).is_file():
         raise ValueError(f"Publication reference file does not exist: {reference}")
     if verify_files:
         for asset in publication.assets:
@@ -248,7 +267,9 @@ def authenticated_item_to_stac(
         end_datetime=publication.end_datetime,
         collection=publication.collection_id,
     )
-    item.set_self_href(str(output))
+    # PySTAC 1.x collapses a double backslash into one slash; use POSIX form
+    # so a Windows UNC host remains //host/share rather than /host/share.
+    item.set_self_href(output.as_posix())
     FileExtension.add_to(item)
     _declare_extensions(item, publication.assets)
     for link in publication.links:
@@ -276,7 +297,7 @@ def _new_collection(publication: AuthenticatedItemPublication, item: pystac.Item
         extent=extent,
         license=publication.license,
     )
-    collection.set_self_href(str(path))
+    collection.set_self_href(path.as_posix())
     return collection
 
 
@@ -319,11 +340,13 @@ def publish_authenticated_item(
     catalog_href = catalog.get_self_href()
     if catalog_href is None or _is_remote_href(catalog_href):
         raise ValueError("Publishing requires a saved local STAC Catalog")
-    catalog_dir = Path(catalog_href).resolve().parent
+    catalog_dir = Path(catalog_href).absolute().parent
+    if os.name == "nt" and catalog_dir.drive.startswith("\\\\"):
+        raise ValueError("PySTAC catalog publication requires a mapped drive path on Windows, not a UNC root")
     collection_dir = _confined_path(catalog_dir / publication.collection_id, catalog_dir)
     collection_path = _confined_path(collection_dir / "collection.json", catalog_dir)
     output = (
-        Path(item_path).resolve()
+        Path(item_path).absolute()
         if item_path is not None
         else _confined_path(collection_dir / publication.item_id / f"{publication.item_id}.json", catalog_dir)
     )

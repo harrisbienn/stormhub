@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pystac
 import pytest
@@ -73,6 +73,17 @@ def test_generated_destinations_reject_directory_link_escape(tmp_path, boundary)
         publish_authenticated_item(catalog, publication, reference_path=manifest)
     assert list(outside.iterdir()) == []
     assert catalog_path.read_bytes() == before
+
+
+def test_confined_path_preserves_safe_logical_namespace(tmp_path):
+    """Validate resolved targets while retaining the caller's path namespace."""
+    from stormhub.publishing import _confined_path
+
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    _directory_link(alias, target)
+    assert _confined_path(alias / "item.json", tmp_path) == alias.absolute() / "item.json"
 
 
 def test_existing_collection_cannot_redirect_writes_outside_catalog(tmp_path):
@@ -210,6 +221,62 @@ def test_publisher_fails_closed_on_changed_or_duplicate_content(tmp_path: Path) 
     changed.write_text('{"type":"Feature"}\n', encoding="utf-8")
     publish_authenticated_item(catalog, publication, reference_path=manifest)
     with pytest.raises(ValueError, match="already published"):
+        publish_authenticated_item(catalog, publication, reference_path=manifest)
+
+
+def test_long_reference_and_asset_paths_remain_authenticated_and_portable(tmp_path: Path) -> None:
+    """Read long native paths while keeping device prefixes out of STAC links."""
+    from stormhub.publishing import _local_io_path, _publication_href
+
+    catalog = _catalog(tmp_path)
+    publication, _ = _publication(tmp_path)
+    deep = tmp_path / ("long-evidence-" * 5) / ("retained-output-" * 5) / ("nested-" * 8)
+    native = _local_io_path(deep)
+    native.mkdir(parents=True)
+    manifest = deep / "response.json"
+    _local_io_path(manifest).write_bytes(b"immutable response")
+    asset = deep / "result.hdf"
+    _local_io_path(asset).write_bytes(b"authenticated hydraulic output")
+    assets = tuple(
+        AuthenticatedAsset(
+            key=key, href=str(path), sha256=hashlib.sha256(_local_io_path(path).read_bytes()).hexdigest(),
+            size_bytes=_local_io_path(path).stat().st_size, media_type="application/octet-stream", roles=("data",),
+        ) for key, path in (("manifest", manifest), ("result", asset))
+    )
+    publication = replace(publication, assets=assets)
+    assert len(str(asset)) > 260
+    # Path.resolve may return a device-prefixed UNC mount only for the long
+    # asset, while the shorter Item path resolves to the ordinary mount.
+    relative = _publication_href(str(_local_io_path(asset)), manifest, tmp_path / "catalog/item.json")
+    assert "?" not in relative and not Path(relative).is_absolute()
+    item = publish_authenticated_item(catalog, publication, reference_path=manifest)
+    saved = pystac.Item.from_file(item.get_self_href())
+    for projected in saved.assets.values():
+        assert "?" not in projected.href and not Path(projected.href).is_absolute()
+        resolved = (Path(item.get_self_href()).parent / projected.href).resolve()
+        assert _local_io_path(resolved).is_file()
+    _local_io_path(asset).write_bytes(b"changed bytes")
+    with pytest.raises(ValueError, match="Size mismatch|Checksum mismatch"):
+        publish_authenticated_item(catalog, replace(publication, item_id="changed"), reference_path=manifest)
+
+
+def test_unc_collection_href_keeps_the_network_host(tmp_path: Path) -> None:
+    """A UNC catalog path must never collapse to a local drive-root path."""
+    from stormhub.publishing import _new_collection, authenticated_item_to_stac
+
+    publication, manifest = _publication(tmp_path)
+    item = authenticated_item_to_stac(publication, reference_path=manifest, item_path=tmp_path / "item.json")
+    collection = _new_collection(publication, item, PureWindowsPath("//server/share/catalog/collection.json"))
+    assert collection.get_self_href() == "//server/share/catalog/collection.json"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows mapped-drive boundary")
+def test_unc_catalog_refuses_before_any_filesystem_write(tmp_path):
+    """Reject PySTAC 1.x's unsupported UNC reload boundary explicitly."""
+    catalog = pystac.Catalog(id="unc", description="UNC test")
+    catalog.set_self_href("//server/share/catalog/catalog.json")
+    publication, manifest = _publication(tmp_path)
+    with pytest.raises(ValueError, match="mapped drive"):
         publish_authenticated_item(catalog, publication, reference_path=manifest)
 
 
