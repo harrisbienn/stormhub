@@ -60,7 +60,7 @@ jobs:
           tests/test_authenticated_publisher.py tests/test_preview_server.py
           tests/test_requests_security.py tests/test_scenario_contract.py
           tests/test_scenario_publisher.py tests/test_scenario_response.py
-          tests/test_scenario_stac.py
+          tests/test_scenario_stac.py tests/test_precipitation_features.py
       - name: Record resolved test dependencies
         run: python -m pip freeze --all
   distribution:

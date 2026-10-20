@@ -1,0 +1,1 @@
+{"contract_version":"stormhub/normalized-precipitation/0.1.0","event_end":"2020-01-01T03:00:00Z","event_start":"2020-01-01T00:00:00Z","grid":{"cell_size_meters":1000,"crs":"EPSG:5070","origin":[0,0],"row_order":"south_to_north","shape":[1,2]},"interval_minutes":60,"measurement":"interval-depth","units":"mm","values":[[2,8],[4,2],[0,6]]}

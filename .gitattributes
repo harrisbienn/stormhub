@@ -1,0 +1,2 @@
+# Preserve exact source bytes authenticated by the rainfall fixture manifests.
+tests/fixtures/precipitation/*.json text eol=lf
