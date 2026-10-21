@@ -86,6 +86,52 @@ and `GDAL GRIB metadata <https://gdal.org/en/stable/drivers/raster/grib.html>`_.
 The synthetic saved GRIB fixtures under ``tests/fixtures/hrrr`` have known
 hourly totals and a reproducible generator; native tests replay them offline.
 
+MRMS observations and selected events
+-------------------------------------
+
+``stormhub.met.mrms_precipitation.acquire`` accepts an explicit request::
+
+    {"start":"2025-10-25T12:00:00Z","end":"2025-10-25T18:00:00Z",
+     "product":"MultiSensor_QPE_01H_Pass2",
+     "base_url":"https://noaa-mrms-pds.s3.amazonaws.com",
+     "retrieval_revision":"pilot-pass2-v1"}
+
+Only hourly CONUS MultiSensor QPE Pass 1/Pass 2 is supported. Product codes
+209/6/30 and 209/6/37 define one-hour depths in mm ending at the observation
+timestamp; GRIB template 4.0 itself does not encode that accumulation duration.
+The decoder validates product codes and clocks rather than inferring interval
+or availability from a display comment. See the
+`NOAA MRMS product table <https://www.nssl.noaa.gov/projects/mrms/operational/tables.php>`_.
+Pass identity and retrieval revision are retained explicitly. A new
+``retrieval_revision`` acquires a separate immutable receipt; completed requests
+reuse verified bytes without refetching. Pass 2 never silently replaces Pass 1.
+
+Acquisition bounds are 24 hours, 8 MiB compressed/32 MiB expanded per object
+and a 512 MiB retained cache. Conditional HTTPS requests bind strong ETags;
+compressed and decoded GRIB bytes are separately checksummed. Missing objects,
+changed ETags and malformed/truncated/oversized streams fail. Original
+publication time remains unknown; object Last-Modified and client retrieval
+times are not backdated. Nominal product latency is not as-of evidence.
+
+``normalize`` uses the same conservative remapping implementation as HRRR,
+with geographic native coordinates and the explicit projected target support.
+Missing/no-coverage sentinels and any other negative consumed depths fail;
+they never become zero rainfall. The ``observed-precipitation/0.1.0`` receipt
+binds source acquisition, normalized grids, weights, support, decoded metadata,
+volume checks and code/dependency provenance. MRMS is a multi-sensor estimate,
+potentially including model input, not independent ground truth. Snow storage
+and melt remain outside this adapter.
+
+``stormhub.met.precipitation_event.assemble`` consumes a content-bound
+FloodForecast ``forecast-cycle/0.1.0`` selection plus locally bound source
+receipts. FloodForecast owns observation cutoff, issue time, forecast age and
+interval choice; StormHub verifies selected row indices, clocks, byte hashes,
+shared grids/supports and full contiguous event coverage before composing
+normalized rainfall and invoking the shared calculator. It does not discover
+replacement intervals or fill gaps. Its ``precipitation-event/0.1.0`` receipt
+binds the selected cycle, normalized asset, feature export and producer.
+Event composition and catalog discovery confer no forecast eligibility.
+
 The normalized contract is ``stormhub/normalized-precipitation/0.1.0``:
 
 * ``grid``: CRS, positive ``shape`` [rows, columns], lower-left ``origin``
