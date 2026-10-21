@@ -43,6 +43,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+nwm = ["h5netcdf==1.8.1", "h5py==3.16.0"]
 dev = ["pre-commit", "ruff", "pytest", "pytest-cov", "pytest-json-report"]
 docs = ["sphinx", "numpydoc", "sphinx_rtd_theme", "sphinx_design", "pydata-sphinx-theme", "sphinx-autodoc-typehints", "myst-parser"]
 

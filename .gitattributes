@@ -1,2 +1,4 @@
 # Preserve exact source bytes authenticated by the rainfall fixture manifests.
 tests/fixtures/precipitation/*.json text eol=lf
+# Producer code hashes must be stable across Windows and Linux checkouts.
+stormhub/met/nwm_channel.py text eol=lf
