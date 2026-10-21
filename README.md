@@ -8,6 +8,11 @@
 **StormHub** is an open-source Python library designed to access and process publicly available hydrometeorological data to create catalogs, metadata, and data products for hydrologic modeling. This project automates the generation of STAC catalogs from storm and stream gage data, enabling improved analysis and simulation for flood studies and stochastic storm transposition (SST). StormHub aims to follow the principles of **[FAIR](https://www.nature.com/articles/sdata201618) (Findable, Accessible, Interoperable, and Reusable)** practices, ensuring that all catalogs can be easily reproduced, shared, published, and integrated into broader workflows.
 
 ## Overview
+
+The [rainfall feature contract](docs/source/precipitation_features.rst) provides
+shared, area-weighted descriptors for target DSS and normalized incoming rainfall,
+with authenticated source identity and explicit missingness.
+
 StormHub consists of two primary modules, with a focus on storm data and stream gage metadata:
 
 ### 1. Storm Transposition Module

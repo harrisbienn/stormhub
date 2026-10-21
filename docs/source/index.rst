@@ -8,6 +8,7 @@ stormhub
    User Guide <user_guide.rst>
    LWI Geometry Rerun <lwi_geometry_rerun.rst>
    Scenario Run Contract <scenario_run_contract.rst>
+   Rainfall Feature Contract <precipitation_features.rst>
    API Reference <modules.rst>
    Changelog <change_log.rst>
 
