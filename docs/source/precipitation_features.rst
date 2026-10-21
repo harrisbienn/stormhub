@@ -13,9 +13,78 @@ One calculation path
 ``stormhub.met.precipitation_features.extract_features`` accepts normalized
 interval-depth grids, exact source identity, spatial support, and extractor
 provenance. The module requires only the standard library. The DSS and JSON
-adapters in ``precipitation_adapters`` feed this same calculator. Future HRRR
-adapters must normalize units, clocks, row order, interval accumulation, and
-missingness before using it. NWM streamflow is not a rainfall input.
+adapters in ``precipitation_adapters`` and the HRRR adapter in
+``hrrr_normalization`` feed this same calculator. Native adapters normalize
+units, clocks, row order, interval accumulation, and missingness before using
+it. NWM streamflow is not a rainfall input.
+
+Bounded HRRR research forcing
+----------------------------
+
+``python -m stormhub.met.hrrr_cli`` accepts ``--request``, ``--grid``,
+``--support``, ``--cache``, ``--output`` and explicit ``--revision`` inputs.
+The request JSON has exactly these fields::
+
+    {"initialization":"2025-10-25T18:00:00Z","hours":24,
+     "model_version":"hrrr-v4",
+     "base_url":"https://noaa-hrrr-bdp-pds.s3.amazonaws.com"}
+
+Grid/support files use the existing contracts above. ``--offline`` requires
+a retained complete acquisition and verifies every source checksum before
+normalization. Use a new output directory for a changed code revision or input;
+existing artifacts cannot be replaced with different content. The CLI records
+``--dirty`` when explicitly supplied; the calling orchestrator must verify the
+actual checkout. Neither this adapter nor catalog registration grants eligibility.
+
+Only CONUS surface ``wrfsfc`` hourly APCP is supported. The 00/06/12/18 UTC
+cycles allow up to 48 hours; other cycles allow 18. The adapter selects one
+hourly record per valid interval, then independently checks GRIB2 template 4.8,
+surface, parameter, cycle, generating process, units, statistical process and
+duration through GDAL. Cumulative records are never differenced or substituted.
+Missing hours, duplicate hourly records, mixed grids/cycles, negative rainfall
+and missing values in consumed cells fail closed. A failed acquisition has no
+completion receipt. The GRIB decoder uses existing Rasterio/GDAL dependencies.
+
+Acquisition uses HTTPS inventories and conditional byte-range requests pinned
+to a strong ETag. Each retained inventory/message has a SHA256 and byte count.
+Transient failures receive at most three attempts; changed objects fail. Default
+limits are 8 MiB per message, 64 MiB per request and 256 MiB retained cache;
+the Python API permits explicit budgets up to a 1 GiB cache. A fresh request
+retains only selected messages and inventories, not whole CONUS products.
+The caller owns cache retention/eviction; no automatic deletion occurs.
+
+Conservative remapping intersects projected source-cell polygons with the
+target cells required by the support. Each source edge has four segments.
+The projected partition must cover each selected cell to 1e-7 relative area;
+interval common-footprint volume accounting must agree within max(1e-6 m3,
+1e-10 times source volume). These checks establish numerical bookkeeping,
+not meteorological accuracy. Remapping assumes constant depth inside each
+native cell; subcell gradients and projection-edge approximation remain
+research limitations. Limits are 250,000 target grid cells, 50,000 selected
+target cells and 100,000 cells in the native read window. Outside selected
+support cells remain null. Region aggregation uses the shared calculator.
+
+``stormhub/forcing-dataset/0.1.0`` binds the immutable acquisition receipt,
+provider/model declaration, initialization and valid intervals, raw GRIB tags,
+normalized artifact, weights, support, features, producer code/dependencies,
+and volume checks. ``forcing_id`` binds acquisition ID, normalized descriptor,
+support hash and producer; ``dataset_id`` hashes the complete receipt excluding
+itself. Artifact descriptors resolve within the output directory; descriptors
+inside acquisition resolve within the explicitly bound raw cache.
+
+``observed_at`` means this client retrieved the message at that instant.
+Object Last-Modified is recorded separately and does not prove original
+publication time. Archive replay therefore has no operational issue time or
+verified as-of hindcast vintage. APCP is liquid-water equivalent; no snow
+storage/melt, ongoing-event observations, or NWM state is included. The receipt
+is explicitly research-only and ``forecast_eligible=false``.
+
+Primary provider specifications:
+`NOAA HRRR products <https://www.nco.ncep.noaa.gov/pmb/products/hrrr/>`_,
+`NOAA GRIB2 template 4.8 <https://www.nco.ncep.noaa.gov/pmb/docs/grib2/grib2_doc/grib2_temp4-8.shtml>`_,
+and `GDAL GRIB metadata <https://gdal.org/en/stable/drivers/raster/grib.html>`_.
+The synthetic saved GRIB fixtures under ``tests/fixtures/hrrr`` have known
+hourly totals and a reproducible generator; native tests replay them offline.
 
 The normalized contract is ``stormhub/normalized-precipitation/0.1.0``:
 
