@@ -13,6 +13,10 @@ The [rainfall feature contract](docs/source/precipitation_features.rst) provides
 shared, area-weighted descriptors for target DSS and normalized incoming rainfall,
 with authenticated source identity and explicit missingness.
 
+The [NWM channel boundary](docs/source/nwm_channel.rst) provides bounded,
+replayable analysis and short-range streamflow extracts for selected reaches.
+Spatial equivalence and scientific use require a separately reviewed crosswalk.
+
 StormHub consists of two primary modules, with a focus on storm data and stream gage metadata:
 
 ### 1. Storm Transposition Module
