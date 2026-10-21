@@ -66,9 +66,10 @@ def build_spatial_support(grid: dict, regions: list[dict], *, region_crs: str, p
     Region geometries are GeoJSON, with explicit id and kind. Full polygon area
     remains the denominator even when the forcing grid does not cover it.
     """
+    import numpy as np
+    import shapely
     from pyproj import CRS, Transformer
-    from shapely.geometry import box, mapping, shape
-    from shapely.ops import transform
+    from shapely.geometry import box, mapping
     from shapely.prepared import prep
 
     validate_grid(grid)
@@ -82,7 +83,12 @@ def build_spatial_support(grid: dict, regions: list[dict], *, region_crs: str, p
     x0, y0 = grid["origin"]
     size = grid["cell_size_meters"]
     for region in sorted(regions, key=lambda r: r["id"]):
-        polygon = transform(project, shape(region["geometry"]))
+        # GEOS decoding and the coordinate-array API avoid MultiPolygon
+        # collection coercion failures with Shapely 2.0 and newer NumPy.
+        polygon = shapely.transform(
+            shapely.from_geojson(json.dumps(region["geometry"])),
+            lambda xy: np.column_stack(project(xy[:, 0], xy[:, 1])),
+        )
         if polygon.geom_type not in {"Polygon", "MultiPolygon"} or polygon.is_empty or not polygon.is_valid:
             raise PrecipitationFeatureError("regions must be valid nonempty polygons")
         if region["id"] in polygons:

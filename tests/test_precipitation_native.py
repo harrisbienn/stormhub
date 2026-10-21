@@ -43,6 +43,37 @@ def test_fractional_geometry_and_partition():
         )
 
 
+def test_multipart_support_with_crs_transform():
+    """Real disjoint subbasins survive multipart decoding and reprojection."""
+    pytest.importorskip("pyproj")
+    pytest.importorskip("shapely")
+    regions = [
+        {
+            "id": "basin",
+            "kind": "basin",
+            "geometry": {
+                "type": "MultiPolygon",
+                "coordinates": [
+                    [[[0, 0], [0.005, 0], [0.005, 0.005], [0, 0.005], [0, 0]]],
+                    [[[0.01, 0], [0.015, 0], [0.015, 0.005], [0.01, 0.005], [0.01, 0]]],
+                ],
+            },
+        }
+    ]
+    grid = {
+        "crs": "EPSG:3857",
+        "shape": [2, 2],
+        "origin": [0, 0],
+        "cell_size_meters": 1000,
+        "row_order": "south_to_north",
+    }
+    support = build_spatial_support(grid, regions, region_crs="EPSG:4326")
+    region = support["regions"][0]
+    assert len(region["cells"]) == 2
+    assert sum(cell["area_m2"] for cell in region["cells"]) == pytest.approx(region["area_m2"])
+    assert region["area_m2"] == pytest.approx(619601.45231, rel=1e-6)
+
+
 def test_real_dss_preserves_zero_missing_row_order_and_original_bytes(tmp_path):
     """Round-trip a small actual DSS asset separately from portable unit tests."""
     hecdss = pytest.importorskip("hecdss")
