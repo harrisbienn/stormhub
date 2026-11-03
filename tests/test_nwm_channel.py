@@ -35,6 +35,7 @@ def test_selection_roles_and_horizons():
         ("product", "medium_range"),
         ("network", "NHDPlusHR"),
         ("model_version", "v2.1"),
+        ("model_version", "v3.2"),
         ("reach_ids", [1, 1]),
         ("cycle", "2025-10-25T18:30:00Z"),
         ("base_url", "https://user:password@example.test"),

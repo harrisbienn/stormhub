@@ -1,4 +1,4 @@
-"""Bounded NWM v3 CONUS channel analysis and short-range research exports.
+"""Bounded NWM v3.0/v3.1 CONUS channel analysis and short-range research exports.
 
 Archive cycle, model initialization and valid time are distinct. Native reads
 stay here; consumers receive portable selected-reach JSON, never NetCDF arrays.
@@ -40,7 +40,7 @@ def selections(request: dict) -> list[dict]:
     cycle = utc(request["cycle"])
     if cycle.minute or cycle.second or cycle.microsecond:
         raise PrecipitationFeatureError("NWM archive cycle must be hourly")
-    if request["model_version"] != "v3.0" or request["network"] != NETWORK:
+    if request["model_version"] not in {"v3.0", "v3.1"} or request["network"] != NETWORK:
         raise PrecipitationFeatureError("unsupported NWM model/network")
     reaches = request["reach_ids"]
     if (

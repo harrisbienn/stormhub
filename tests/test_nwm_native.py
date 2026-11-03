@@ -22,7 +22,7 @@ def native(path, request=REQUEST):
         f.dimensions = {"feature_id": 2, "time": 1, "reference_time": 1}
         f.attrs.update(
             {
-                "NWM_version_number": "v3.0",
+                "NWM_version_number": request["model_version"],
                 "model_output_type": "channel_rt",
                 "model_configuration": "short_range"
                 if request["product"] == "short_range"
@@ -51,14 +51,25 @@ def native(path, request=REQUEST):
 
 
 @pytest.mark.parametrize("product,hours", [("short_range", 2), ("analysis_assim", 0)])
-def test_actual_packing_and_analysis_clock(tmp_path, product, hours):
+@pytest.mark.parametrize("model_version", ["v3.0", "v3.1"])
+def test_actual_packing_and_analysis_clock(tmp_path, product, hours, model_version):
     """Known packed values decode once, preserving the three-hour analysis origin."""
-    request = {**REQUEST, "product": product, "hours": hours}
+    request = {**REQUEST, "product": product, "hours": hours, "model_version": model_version}
     path = tmp_path / "tiny.nc"
     selected = native(path, request)
     result = decode(path, request, selected)
     assert result["flow_m3_s"] == {"15223060": 12.5}
     assert utc(result["model_initialization"]).hour == (15 if product == "analysis_assim" else 18)
+
+
+@pytest.mark.parametrize("declared,native_version", [("v3.0", "v3.1"), ("v3.1", "v3.0")])
+def test_native_version_must_equal_explicit_request(tmp_path, declared, native_version):
+    """Supported versions are not interchangeable or silently relabeled."""
+    request = {**REQUEST, "model_version": native_version}
+    path = tmp_path / "version.nc"
+    selected = native(path, request)
+    with pytest.raises(PrecipitationFeatureError, match="model/product"):
+        decode(path, {**request, "model_version": declared}, selected)
 
 
 @pytest.mark.parametrize("fault", ["units", "stage", "network", "missing", "duplicate", "reach", "clock", "version"])
