@@ -16,6 +16,8 @@ with authenticated source identity and explicit missingness.
 The [NWM channel boundary](docs/source/nwm_channel.rst) provides bounded,
 replayable analysis and short-range streamflow extracts for selected reaches.
 Spatial equivalence and scientific use require a separately reviewed crosswalk.
+The [NWM state boundary](docs/source/nwm_state.rst) adds bounded land wetness and
+reservoir exports with explicit spatial coverage and unknown datum/state equivalence.
 
 StormHub consists of two primary modules, with a focus on storm data and stream gage metadata:
 
