@@ -63,6 +63,7 @@ jobs:
           tests/test_scenario_stac.py tests/test_precipitation_features.py tests/test_hrrr_acquisition.py
           tests/test_mrms_precipitation.py
           tests/test_nwm_channel.py
+          tests/test_nwm_state.py
       - name: Record resolved test dependencies
         run: python -m pip freeze --all
   geometry:
@@ -84,6 +85,7 @@ jobs:
       - run: python -I -m pytest -q tests/test_mrms_native.py
       - run: python -m pip install h5netcdf==1.8.1 h5py==3.16.0
       - run: python -I -m pytest -q tests/test_nwm_native.py
+      - run: python -I -m pytest -q tests/test_nwm_state_native.py
   distribution:
     name: Build tested distribution
     needs: [unit, geometry]
