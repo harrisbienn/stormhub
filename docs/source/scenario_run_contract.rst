@@ -1,6 +1,16 @@
 Scenario Run Contract
 =====================
 
+.. note::
+
+   ``stormhub/scenario-run/2.2.0`` is frozen for historical compatibility.
+   Existing campaigns and records retain that contract and their original
+   identities. FloodForecast owns new integrated scenario-response contracts,
+   qualification, assessment, and promotion semantics; see
+   `FloodForecast ADR 0012 <https://github.com/harrisbienn/floodforecast/blob/main/docs/decisions/0012-floodforecast-owns-scenario-response-run.md>`_.
+   StormHub continues to own precipitation identity and generic STAC publication.
+   The contract described below applies to historical StormHub 2.2 records.
+
 The scenario run contract is the handoff between precipitation preparation,
 hydrologic-model automation, hydraulic-model automation, quality control, and
 STAC publication. It records one planned or completed integrated execution
