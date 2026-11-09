@@ -144,6 +144,13 @@ cd stormhub
 pip install -e .
 ```
 
+Use a fresh virtual environment and the dependencies declared in `pyproject.toml`;
+add `.[nwm]` for the native NetCDF/HDF5 research readers. The old `env.yaml` is a
+retired notebook snapshot whose versions disagree with package metadata. It is
+retained as historical provenance, not a second supported installation recipe.
+CI resolves these package requirements in disposable environments; its dependency
+receipt is not a deployment lock or approval to replace an accepted study runtime.
+
 ## Usage
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
 
@@ -198,8 +205,24 @@ workflow-only changes. It checks Python 3.10?3.12 on Linux and 3.12 on Windows.
 The portable subset covers publication, scenario contracts, preview confinement,
 and HTTP-client credential/redirect/proxy/streaming behavior. Only the preview
 tests use sockets, on ephemeral loopback ports; no test calls an external service.
-Package installation still needs the package index. Native DSS/GIS/HEC and large
-model qualification remain separate gates.
+Package installation still needs the package index.
+
+The `Scientific contracts` matrix runs Python 3.12 on Linux and Windows with the
+full package and `nwm` dependencies. It discovers all tests under `tests/`, including
+catalog setup/population/checkpoint recovery, source/target DSS export and coverage,
+headless thumbnails, and the portable security suites. Tiny real DSS, GRIB,
+geometry and NetCDF/HDF5 fixtures exercise the native readers without installed
+HEC software or external provider calls. Required backend imports fail the job
+before pytest if a native dependency is missing; optional imports cannot silently
+turn this coverage into skips. Test results and resolved dependencies are retained
+as workflow artifacts. The distribution build and manual release depend on both
+the portable and scientific matrices passing.
+
+Tests needing an external service, an installed HEC application, or large/untracked
+assets must be marked `requires_network`, `requires_hec`, or `large_assets`,
+respectively. Routine scientific CI excludes only these explicit gates, rather
+than maintaining a second list of approved test modules. Such qualification remains
+separate; a small-fixture pass does not establish engineering model acceptance.
 
 Reproduce the portable check in a clean environment:
 
@@ -207,13 +230,27 @@ Reproduce the portable check in a clean environment:
 python -m pip install pip==26.2.1 pytest==9.1.1 packaging==26.3
 python -m pip install --no-deps .
 python .github/scripts/install_ci_dependencies.py
-python -I -m pytest tests/test_authenticated_publisher.py tests/test_preview_server.py tests/test_requests_security.py tests/test_scenario_contract.py tests/test_scenario_publisher.py tests/test_scenario_response.py tests/test_scenario_stac.py
+python -I -m pytest -q tests/test_authenticated_publisher.py tests/test_preview_server.py \
+  tests/test_requests_security.py tests/test_scenario_contract.py tests/test_scenario_publisher.py \
+  tests/test_scenario_response.py tests/test_scenario_stac.py tests/test_precipitation_features.py \
+  tests/test_hrrr_acquisition.py tests/test_mrms_precipitation.py tests/test_nwm_channel.py \
+  tests/test_nwm_state.py tests/test_publication_recovery.py tests/test_provider_recovery.py
+```
+
+Reproduce the scientific job in a separate clean Python 3.12 environment:
+
+```bash
+python -m pip install pip==26.2.1
+python -m pip install ".[nwm]" pytest==9.1.1
+python -m pip check
+python -I -c "import hecdss, h5netcdf, h5py, numpy, pyproj, rasterio, geopandas, rioxarray; import stormhub.met.storm_catalog"
+python -I -m pytest -q -rs --strict-markers tests -m "not requires_network and not requires_hec and not large_assets"
 ```
 
 The CI dependency selector reads runtime pins from the installed package metadata;
 it is not a substitute for a complete scientific environment installation.
-Requests is pinned consistently to 2.34.2 in package, Conda, and documentation
-requirements. Its upstream fixes cover
+Requests is pinned consistently to 2.34.2 in package metadata, documentation
+requirements, and the historical Conda snapshot. Its upstream fixes cover
 [netrc credential leakage](https://github.com/psf/requests/security/advisories/GHSA-9hjg-9r4m-mvj7)
 and [archive extraction](https://github.com/psf/requests/security/advisories/GHSA-gc5v-m9x4-r6x2).
 The Requests regression fixtures contain dummy credentials and use a fake HTTP
@@ -230,9 +267,10 @@ reviewed updates.
 
 Before the first release, an administrator must configure the PyPI trusted publisher
 for this repository, `release.yaml`, and environment `pypi`; restrict that environment
-to `main` with reviewer approval; and protect `main` with the CI unit matrix and
-`Build tested distribution` checks. Configure the publisher before removing the
-obsolete `PYPI_TOKEN` secret; the new workflow does not consume it. These settings
+to `main` with reviewer approval; and protect `main` with the CI unit matrix,
+both `Scientific contracts` checks, and `Build tested distribution`. Configure the
+publisher before removing the obsolete `PYPI_TOKEN` secret; the new workflow does
+not consume it. These settings
 are not established by committing workflow YAML. The 2026-09-21 review found main
 unprotected; no package was released as part of validation. See
 [PyPI's setup instructions](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
