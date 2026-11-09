@@ -97,6 +97,29 @@ def test_same_origin_redirect_preserves_method_and_conditional_headers(code, met
     assert redirected.get_header("If-match") == '"one"'
 
 
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_permanent_redirect_supports_legacy_urllib(monkeypatch, method):
+    """Python 3.10's missing 308 support does not reject a safe permanent redirect."""
+    from urllib.error import HTTPError
+    from urllib.request import HTTPRedirectHandler
+
+    redirect = HTTPRedirectHandler.redirect_request
+
+    def legacy_redirect(self, req, fp, code, msg, headers, newurl):
+        if code == 308:
+            raise HTTPError(req.full_url, code, msg, headers, fp)
+        return redirect(self, req, fp, code, msg, headers, newurl)
+
+    monkeypatch.setattr(HTTPRedirectHandler, "redirect_request", legacy_redirect)
+    request = Request("https://example.test/data", method=method, headers={"If-Match": '"one"'})
+    redirected = hrrr._ProviderRedirectHandler().redirect_request(
+        request, None, 308, "permanent redirect", {}, "https://example.test/renamed"
+    )
+    assert redirected.full_url == "https://example.test/renamed"
+    assert redirected.get_method() == method
+    assert redirected.get_header("If-match") == '"one"'
+
+
 @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
 def test_redirect_does_not_read_an_unbounded_response_body(code):
     """Redirect handling discards its response without urllib's unbounded drain."""

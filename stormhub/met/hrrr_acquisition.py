@@ -93,7 +93,10 @@ class _ProviderRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if _https_origin(req.full_url) != _https_origin(newurl):
             raise PrecipitationFeatureError("provider redirect must remain on the original HTTPS origin")
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        # Python 3.10's urllib does not recognize 308. For our GET/HEAD
+        # requests its redirect construction is identical to supported 307.
+        request_code = 307 if code == 308 and req.get_method() in {"GET", "HEAD"} else code
+        redirected = super().redirect_request(req, fp, request_code, msg, headers, newurl)
         if redirected is not None and req.get_method() == "HEAD":
             redirected.method = "HEAD"
         return redirected
