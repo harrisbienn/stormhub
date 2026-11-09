@@ -77,9 +77,6 @@ def exclusive_file_lock(path: Path, *, timeout: float = 30.0) -> Iterator[None]:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
-        if stream.seek(0, os.SEEK_END) == 0:
-            stream.write(b"\0")
-            stream.flush()
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -100,6 +97,11 @@ def exclusive_file_lock(path: Path, *, timeout: float = 30.0) -> Iterator[None]:
                     raise TimeoutError(f"Timed out waiting for publication lock: {path.name}") from exc
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         try:
+            # Windows can lock beyond EOF. Initialize only while owning that
+            # byte: another opener may have seen EOF before this owner locked it.
+            if stream.seek(0, os.SEEK_END) == 0:
+                stream.write(b"\0")
+                stream.flush()
             yield
         finally:
             if os.name == "nt":

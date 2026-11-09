@@ -234,6 +234,26 @@ def test_busy_lock_is_bounded_and_never_deleted(tmp_path):
         assert path.is_file()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows byte-range locks deny concurrent sentinel writes")
+def test_contended_empty_lock_waits_before_initializing(tmp_path):
+    """A contender must not write a new lock's sentinel while another process owns its byte."""
+    import msvcrt
+
+    path = tmp_path / "publisher.lock"
+    with path.open("a+b") as owner:
+        msvcrt.locking(owner.fileno(), msvcrt.LK_NBLCK, 1)
+        try:
+            with pytest.raises(TimeoutError, match="publication lock"):
+                with _files.exclusive_file_lock(path, timeout=0):
+                    pytest.fail("contender acquired an owned empty lock")
+        finally:
+            owner.seek(0)
+            msvcrt.locking(owner.fileno(), msvcrt.LK_UNLCK, 1)
+    assert path.read_bytes() == b""
+    with _files.exclusive_file_lock(path, timeout=0):
+        assert path.is_file()
+
+
 def test_staging_name_collision_preserves_unowned_file(tmp_path, monkeypatch):
     """A temporary-name collision cannot delete or replace another writer's stage."""
     staged = tmp_path / ".stormhub-collision.tmp"
