@@ -15,7 +15,7 @@ from importlib.metadata import version
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .hrrr_acquisition import descriptor, http_request, verify_asset, write_immutable
+from .hrrr_acquisition import descriptor, http_request, serialize_acquisition, verify_asset, write_immutable
 from .precipitation_features import (
     NORMALIZED_CONTRACT,
     PrecipitationFeatureError,
@@ -103,6 +103,7 @@ def validate_acquisition(receipt: dict, root: Path) -> None:
         verify_asset(root, record["grib"])
 
 
+@serialize_acquisition
 def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_request) -> dict:
     """Retain at most 24 hourly products under fixed compressed/expanded/cache limits.
 

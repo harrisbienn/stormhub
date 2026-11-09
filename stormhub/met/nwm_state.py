@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .hrrr_acquisition import descriptor, http_request, verify_asset, write_immutable
+from .hrrr_acquisition import descriptor, http_request, serialize_acquisition, verify_asset, write_immutable
 from .precipitation_adapters import build_spatial_support
 from .precipitation_features import PrecipitationFeatureError, canonical_bytes, digest, utc, validate_grid
 
@@ -56,6 +56,7 @@ def validate_acquisition(record: dict, root: Path) -> Path:
     return verify_asset(root, record["asset"])
 
 
+@serialize_acquisition
 def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_request) -> dict:
     """Retain one conditional, size-bounded object and replay without network."""
     import json
@@ -75,7 +76,8 @@ def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_
     size, etag = int(headers.get("content-length", 0)), headers.get("etag", "")
     if status != 200 or not 0 < size <= MAX_OBJECT or not re.fullmatch(r'"[^"\r\n]+"', etag):
         raise PrecipitationFeatureError("state object requires bounded size and strong ETag")
-    if sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) + size > MAX_CACHE:
+    used = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
+    if used > MAX_CACHE:
         raise PrecipitationFeatureError("state cache exceeds 512 MiB")
     status, response, content = transport(selected["url"], method="GET", headers={"If-Match": etag}, limit=size)
     if (
@@ -88,6 +90,10 @@ def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_
     import hashlib
 
     path = root / (hashlib.sha256(content).hexdigest() + ".nc")
+    # Retained identical payloads consume no additional disk budget on retry.
+    extra = 0 if path.exists() else len(content)
+    if used + extra > MAX_CACHE:
+        raise PrecipitationFeatureError("state cache exceeds 512 MiB")
     write_immutable(path, content)
     record = {
         "contract_version": ACQUISITION,
@@ -99,7 +105,10 @@ def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_
         "original_publication_time": None,
     }
     record["acquisition_id"] = digest(record)
-    write_immutable(target, canonical_bytes(record))
+    encoded = canonical_bytes(record)
+    if sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) + len(encoded) > MAX_CACHE:
+        raise PrecipitationFeatureError("state receipt exceeds retained cache budget")
+    write_immutable(target, encoded)
     return record
 
 

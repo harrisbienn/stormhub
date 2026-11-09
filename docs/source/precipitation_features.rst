@@ -53,6 +53,49 @@ the Python API permits explicit budgets up to a 1 GiB cache. A fresh request
 retains only selected messages and inventories, not whole CONUS products.
 The caller owns cache retention/eviction; no automatic deletion occurs.
 
+Shared provider transport and recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+HRRR, MRMS and both NWM acquisition adapters serialize each cache's acquisition
+and budget accounting using an OS lock. A concurrent identical request reuses
+the first completed receipt, including its original observation timestamps.
+Lock contention fails after 30 seconds; retry after the active acquisition.
+Keep the persistent lock file in place and restrict cache writes to trusted
+operators. Other manual or external cache writers do not participate.
+
+Payloads and receipts are staged in unique sibling files, flushed, and published
+without replacing an existing final file. Identical writes are idempotent and
+conflicting bytes fail. This requires a filesystem with atomic hard-link creation
+and replacement, such as local NTFS; qualify remote storage separately. A crash
+may retain an unreferenced ``.stormhub-*.tmp`` file, never a partial final file.
+Remove abandoned stages only with all writers stopped. Existing malformed or
+conflicting final artifacts from older runs require explicit operator quarantine;
+they are not silently repaired or deleted. A receipt is accepted only after all
+of its retained assets pass their existing integrity checks.
+
+The urllib transport verifies TLS, allows only HTTPS requests without URL
+credentials/query/fragment, and follows redirects only within the same HTTPS
+host and port. Conditional and range headers survive accepted redirects.
+HEAD remains HEAD for every supported redirect status; redirect response bodies
+are closed without an unbounded drain.
+Actual body reads enforce the adapter's byte limit even if Content-Length is
+false. Transient network errors and HTTP 429/500/502/503/504 receive up to three
+attempts; certificate and other permanent failures do not. Each HTTP call shares
+a cooperative 180-second deadline across reads and attempts, with at most
+45 seconds of socket inactivity. DNS and an already-blocked OS read are not a
+hard wall-clock bound; the orchestrator must retain its process deadline.
+The limit applies to each HTTP call, not a complete multi-object acquisition.
+Existing environment proxy selection remains urllib's responsibility.
+
+NWM cache accounting charges only newly retained content after the bounded GET,
+so a payload retained before a receipt interruption is not charged twice on retry.
+Completion receipts also count against the retained-cache limit.
+
+MRMS gzip expansion remains separately limited to 32 MiB per object. These
+adapters do not extract provider-controlled archive member paths or accept new
+provider formats. Native decoders and full live acquisition remain separate
+qualification gates.
+
 Conservative remapping intersects projected source-cell polygons with the
 target cells required by the support. Each source edge has four segments.
 The projected partition must cover each selected cell to 1e-7 relative area;

@@ -64,6 +64,7 @@ jobs:
           tests/test_mrms_precipitation.py
           tests/test_nwm_channel.py
           tests/test_nwm_state.py
+          tests/test_publication_recovery.py tests/test_provider_recovery.py
       - name: Record resolved test dependencies
         run: python -m pip freeze --all
   geometry:
