@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from pystac.extensions.file import FileExtension
 from pystac.extensions.item_assets import ItemAssetsExtension
 from pystac.extensions.raster import RasterExtension
 
+from stormhub._files import atomic_write_bytes, exclusive_file_lock
 from stormhub.utils import sha256_file, sha256_multihash
 
 TABLE_EXTENSION_SCHEMA = "https://stac-extensions.github.io/table/v1.2.0/schema.json"
@@ -321,6 +323,31 @@ def _update_item_assets(collection: pystac.Collection, item: pystac.Item) -> Non
         collection.stac_extensions.append(ITEM_ASSETS_EXTENSION_SCHEMA)
 
 
+def _save_stac_atomic(value: pystac.STACObject, *, immutable: bool = False) -> None:
+    path = Path(value.get_self_href())
+    document = value.to_dict(include_self_link=False)
+    # Older accepted Items may use different JSON whitespace. Compare their
+    # complete meaning while retaining the original bytes on identical retry.
+    if immutable and path.exists():
+        if json.loads(path.read_bytes()) != document:
+            raise ValueError(f"Authenticated Item {value.id!r} is already published with different content")
+        return
+    atomic_write_bytes(
+        path, (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8"), immutable=immutable,
+    )
+
+
+def _validate_collection(collection: pystac.STACObject | None, catalog_dir: Path, collection_id: str) -> None:
+    if collection is None:
+        return
+    if not isinstance(collection, pystac.Collection) or collection.id != collection_id:
+        raise ValueError(f"Catalog child {collection_id!r} is not the requested STAC Collection")
+    collection_href = collection.get_self_href()
+    if collection_href is None or _is_remote_href(collection_href):
+        raise ValueError("Collection must be saved locally inside the catalog directory")
+    _confined_path(Path(collection_href), catalog_dir)
+
+
 def publish_authenticated_item(
     catalog: pystac.Catalog,
     publication: AuthenticatedItemPublication,
@@ -329,13 +356,19 @@ def publish_authenticated_item(
     item_path: str | Path | None = None,
     verify_files: bool = True,
 ) -> pystac.Item:
-    """Append one authenticated, caller-owned Item to a saved local STAC Catalog.
+    """Append or recover one authenticated Item in a saved local STAC Catalog.
 
     Generated Item and Collection paths stay within the resolved catalog directory,
     including through existing symlinks/junctions. An explicit ``item_path`` is a
     trusted-caller override and may be outside that directory. Do not pass a reader's
     input through that override. The catalog tree must not be writable by untrusted
     processes; path checks do not prevent concurrent filesystem substitution.
+
+    Cooperating publishers serialize through an OS lock and reload the saved
+    catalog before each change. Complete Items precede atomic Collection and root
+    updates, so readers see only complete linked objects. Identical retry repairs
+    missing membership after interruption; conflicting immutable content fails.
+    Only this API participates in the lock protocol; do not mix other writers.
     """
     catalog_href = catalog.get_self_href()
     if catalog_href is None or _is_remote_href(catalog_href):
@@ -343,40 +376,48 @@ def publish_authenticated_item(
     catalog_dir = Path(catalog_href).absolute().parent
     if os.name == "nt" and catalog_dir.drive.startswith("\\\\"):
         raise ValueError("PySTAC catalog publication requires a mapped drive path on Windows, not a UNC root")
-    collection_dir = _confined_path(catalog_dir / publication.collection_id, catalog_dir)
-    collection_path = _confined_path(collection_dir / "collection.json", catalog_dir)
-    output = (
-        Path(item_path).absolute()
-        if item_path is not None
-        else _confined_path(collection_dir / publication.item_id / f"{publication.item_id}.json", catalog_dir)
-    )
-    collection = catalog.get_child(publication.collection_id)
-    if collection is not None and not isinstance(collection, pystac.Collection):
-        raise ValueError(f"Catalog child {publication.collection_id!r} is not a STAC Collection")
-    if collection is not None:
-        collection_href = collection.get_self_href()
-        if collection_href is None or _is_remote_href(collection_href):
-            raise ValueError("Collection must be saved locally inside the catalog directory")
-        _confined_path(Path(collection_href), catalog_dir)
-    existing = collection.get_item(publication.item_id, recursive=False) if collection is not None else None
-    if existing is not None or output.exists():
-        raise ValueError(f"Authenticated Item {publication.item_id!r} is already published")
-    item = authenticated_item_to_stac(
-        publication,
-        reference_path=reference_path,
-        item_path=output,
-        verify_files=verify_files,
-    )
-    if collection is None:
-        collection = _new_collection(publication, item, collection_path)
-        collection.set_parent(catalog)
-        catalog.add_child(collection, set_parent=False)
-    _update_item_assets(collection, item)
-    # PySTAC's inherited layout strategy can otherwise replace the validated hrefs.
-    item.set_parent(collection)
-    collection.add_item(item, set_parent=False)
-    item.save_object(include_self_link=False)
-    collection.update_extent_from_items()
-    collection.save_object(include_self_link=False)
-    catalog.save_object(include_self_link=False)
-    return item
+    # Preserve validation of a caller-supplied cached object, but never use it as
+    # the authoritative index: two callers may have loaded different generations.
+    _validate_collection(catalog.get_child(publication.collection_id), catalog_dir, publication.collection_id)
+    lock = _confined_path(catalog_dir / ".stormhub-publish.lock", catalog_dir)
+    with exclusive_file_lock(lock):
+        current = pystac.Catalog.from_file(catalog_href)
+        collection_dir = _confined_path(catalog_dir / publication.collection_id, catalog_dir)
+        collection_path = _confined_path(collection_dir / "collection.json", catalog_dir)
+        output = (
+            Path(item_path).absolute()
+            if item_path is not None
+            else _confined_path(collection_dir / publication.item_id / f"{publication.item_id}.json", catalog_dir)
+        )
+        collection = current.get_child(publication.collection_id)
+        # A crash before root replacement can leave a complete unindexed
+        # Collection. Recover it instead of dropping its previously saved Items.
+        if collection is None and collection_path.exists():
+            collection = pystac.Collection.from_file(str(collection_path))
+        _validate_collection(collection, catalog_dir, publication.collection_id)
+        item = authenticated_item_to_stac(
+            publication, reference_path=reference_path, item_path=output, verify_files=verify_files,
+        )
+        if collection is None:
+            collection = _new_collection(publication, item, collection_path)
+        if current.get_child(publication.collection_id) is None:
+            collection.set_parent(current)
+            current.add_child(collection, set_parent=False)
+        existing = collection.get_item(publication.item_id, recursive=False)
+        if existing is not None and Path(existing.get_self_href()).absolute() != output:
+            raise ValueError(f"Authenticated Item {publication.item_id!r} is already published at another path")
+        item.set_parent(collection)
+        if existing is not None:
+            collection.remove_item(publication.item_id)
+        collection.add_item(item, set_parent=False)
+        _update_item_assets(collection, item)
+        _save_stac_atomic(item, immutable=True)
+        collection.update_extent_from_items()
+        _save_stac_atomic(collection)
+        _save_stac_atomic(current)
+        # Retain the historical convenience of an updated caller handle. Its
+        # unsaved edits are not publication input; the disk catalog is canonical.
+        catalog.remove_links(pystac.RelType.CHILD)
+        for link in current.get_links(pystac.RelType.CHILD):
+            catalog.add_link(link)
+        return item

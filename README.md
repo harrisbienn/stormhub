@@ -85,8 +85,7 @@ STAC tree without importing or reinterpreting the caller's domain contract.
 On Windows, local reference and asset reads support extended-length paths while
 serialized STAC hrefs stay relative. Supply ordinary absolute paths to the API;
 Windows device prefixes belong only at native file-I/O boundaries. Keep catalog
-and Item destinations short enough for PySTAC's own filesystem I/O. This does
-not change immutable Item rejection or concurrent/interrupted index semantics.
+and Item destinations short enough for PySTAC's own filesystem I/O.
 Use a mapped drive for Windows network catalogs. The publisher preserves that
 logical namespace while checking physical resolved containment and reading long
 asset paths. PySTAC 1.x cannot reliably reload relative links rooted at a UNC
@@ -100,6 +99,29 @@ dots are rejected. Generated destinations and existing Collection write paths mu
 resolve inside the catalog directory, including through symlinks or junctions.
 Keep that directory writable only by trusted publishers. The optional `item_path`
 is an explicit trusted-caller override; do not expose it to library readers.
+
+The generic publisher serializes cooperating writers with a persistent OS lock
+and reloads the saved catalog inside that lock. Unsaved edits to a caller's
+Catalog handle are not publication input. It stages and flushes complete JSON,
+then publishes the immutable Item before atomically replacing the Collection and
+root index. Readers never follow a newly written link to partial JSON. Identical
+retries preserve accepted Item bytes and repair interrupted index membership;
+different content under an existing identity fails. A complete unindexed
+Collection is recovered before another Item is added.
+
+All writers to a namespace must use this protocol. Historical scenario publishers,
+manual PySTAC writes and external synchronization tools do not acquire its lock;
+stop them before generic publication. Lock contention fails after 30 seconds and
+can be retried; process death releases the OS lock. Do not delete lock files.
+Atomic immutable publication requires same-filesystem hard links and replacement
+semantics, qualified here on local NTFS. Qualify network/mapped-drive storage
+separately; unsupported operations fail closed. Staging files use unique
+`.stormhub-*.tmp` names. Abrupt process death can leave them behind; they are
+never accepted records and must only be removed during a stopped-writer cleanup.
+Existing partial or conflicting final files are preserved for explicit operator
+quarantine, not automatically overwritten. Flushed file writes and atomic rename
+protect process-interruption recovery; Windows power-loss durability and storage
+recovery remain deployment qualification.
 
 ### FAIR Data Sharing and Publishing
 StormHub facilitates FAIR data principles by enabling:

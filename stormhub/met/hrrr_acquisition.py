@@ -7,19 +7,28 @@ as the original forecast publication time.
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import io
 import json
+import socket
 import time
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
+from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from stormhub._files import ImmutableFileConflict, atomic_write_bytes, exclusive_file_lock
 
 from .precipitation_features import PrecipitationFeatureError, canonical_bytes, digest, file_sha256, utc
 
 ACQUISITION_CONTRACT = "stormhub/hrrr-acquisition/0.1.0"
 DEFAULT_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
+_REQUEST_DEADLINE_SECONDS = 180.0
+_SOCKET_TIMEOUT_SECONDS = 45.0
 
 
 def validate_request(request: dict) -> None:
@@ -64,33 +73,122 @@ def select_hour(index: str, *, initialization: str, hour: int, object_size: int)
     return matches[0]
 
 
+def _https_origin(url: str) -> tuple[str, int]:
+    parsed = urlsplit(url)
+    try:
+        port = 443 if parsed.port is None else parsed.port
+    except ValueError as exc:
+        raise PrecipitationFeatureError("invalid provider port") from exc
+    if not 1 <= port <= 65535:
+        raise PrecipitationFeatureError("invalid provider port")
+    if (
+        parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+        or parsed.password is not None or parsed.query or parsed.fragment
+    ):
+        raise PrecipitationFeatureError("provider transport requires HTTPS without credentials, query or fragment")
+    return parsed.hostname.lower(), port
+
+
+class _ProviderRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _https_origin(req.full_url) != _https_origin(newurl):
+            raise PrecipitationFeatureError("provider redirect must remain on the original HTTPS origin")
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and req.get_method() == "HEAD":
+            redirected.method = "HEAD"
+        return redirected
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        if "location" not in headers and "uri" not in headers:
+            return None
+        # urllib normally drains redirect bodies without a limit. They are not
+        # provider data, so close rather than reading them before delegation.
+        fp.close()
+        with io.BytesIO() as discarded:
+            return super().http_error_302(req, discarded, code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _open_provider_request(request: Request, timeout: float):
+    return build_opener(_ProviderRedirectHandler()).open(request, timeout=timeout)
+
+
+def _transient_transport_error(error: Exception) -> bool:
+    if isinstance(error, HTTPError):
+        return error.code in (429, 500, 502, 503, 504)
+    reason = error.reason if isinstance(error, URLError) else error
+    return isinstance(reason, (TimeoutError, ConnectionError)) or (
+        isinstance(reason, OSError)
+        and reason.errno in {errno.ECONNRESET, errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETUNREACH, socket.EAI_AGAIN}
+    )
+
+
 def http_request(url: str, *, method: str, headers: dict, limit: int) -> tuple[int, dict, bytes]:
-    """Use verified TLS and bounded reads, retrying only transient transport failures."""
+    """Use verified TLS, same-origin redirects and actual-byte-bounded reads.
+
+    Three transient attempts share a cooperative 180-second deadline, checked
+    between reads and retries. Socket inactivity is limited to 45 seconds. This
+    is not a hard wall-clock guarantee for DNS or a blocked OS call; callers
+    requiring one must retain their process supervision deadline.
+    """
+    _https_origin(url)
+    if method not in {"HEAD", "GET"} or type(limit) is not int or limit < 0:
+        raise PrecipitationFeatureError("provider transport requires HEAD/GET and a nonnegative byte limit")
+    deadline = time.monotonic() + _REQUEST_DEADLINE_SECONDS
+
+    def remaining() -> float:
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise PrecipitationFeatureError("provider request exceeded its deadline")
+        return seconds
+
     for attempt in range(3):
         try:
-            with urlopen(Request(url, method=method, headers=headers), timeout=45) as response:
-                content = b"" if method == "HEAD" else response.read(limit + 1)
-                if len(content) > limit:
-                    raise PrecipitationFeatureError("HTTP response exceeds configured byte limit")
-                return response.status, {k.lower(): v for k, v in response.headers.items()}, content
-        except (HTTPError, URLError, TimeoutError) as exc:
-            if isinstance(exc, HTTPError) and exc.code not in (429, 500, 502, 503, 504):
-                raise PrecipitationFeatureError(f"provider HTTP {exc.code}: {url}") from exc
+            with _open_provider_request(
+                Request(url, method=method, headers=headers),
+                timeout=min(_SOCKET_TIMEOUT_SECONDS, remaining()),
+            ) as response:
+                remaining()
+                content = bytearray()
+                if method != "HEAD":
+                    while True:
+                        remaining()
+                        chunk = response.read1(min(64 * 1024, limit - len(content) + 1))
+                        remaining()
+                        if not chunk:
+                            break
+                        content.extend(chunk)
+                        if len(content) > limit:
+                            raise PrecipitationFeatureError("HTTP response exceeds configured byte limit")
+                return response.status, {k.lower(): v for k, v in response.headers.items()}, bytes(content)
+        except (HTTPError, URLError, TimeoutError, ConnectionError) as exc:
+            if not _transient_transport_error(exc):
+                label = f"HTTP {exc.code}" if isinstance(exc, HTTPError) else "transport rejected"
+                raise PrecipitationFeatureError(f"provider {label}: {url}") from exc
             if attempt == 2:
                 raise PrecipitationFeatureError(f"provider unavailable after three attempts: {url}") from exc
-            time.sleep(0.5 * (attempt + 1))
+            time.sleep(min(0.5 * (attempt + 1), remaining()))
     raise AssertionError("unreachable retry state")
 
 
 def write_immutable(path: Path, content: bytes) -> None:
-    """Preserve existing evidence and refuse changes to an established artifact."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.read_bytes() != content:
-            raise PrecipitationFeatureError(f"immutable artifact differs: {path.name}")
-        return
-    with path.open("xb") as stream:
-        stream.write(content)
+    """Publish complete evidence atomically; identical concurrent retries are safe."""
+    try:
+        atomic_write_bytes(path, content, immutable=True)
+    except ImmutableFileConflict as exc:
+        raise PrecipitationFeatureError(str(exc)) from exc
+
+
+def serialize_acquisition(function: Callable[..., dict]) -> Callable[..., dict]:
+    """Serialize one cache's budget accounting and completion receipts across processes."""
+
+    @wraps(function)
+    def locked(request: dict, root: Path, *args, **kwargs) -> dict:
+        with exclusive_file_lock(Path(root) / ".stormhub-acquisition.lock"):
+            return function(request, root, *args, **kwargs)
+
+    return locked
 
 
 def descriptor(path: Path, root: Path) -> dict:
@@ -128,6 +226,7 @@ def validate_acquisition(receipt: dict, root: Path) -> None:
             raise PrecipitationFeatureError("message size does not match recorded range")
 
 
+@serialize_acquisition
 def acquire(
     request: dict,
     root: Path,

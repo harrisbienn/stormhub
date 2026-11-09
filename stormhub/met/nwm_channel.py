@@ -14,7 +14,7 @@ from importlib.metadata import version
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .hrrr_acquisition import descriptor, http_request, verify_asset, write_immutable
+from .hrrr_acquisition import descriptor, http_request, serialize_acquisition, verify_asset, write_immutable
 from .precipitation_features import PrecipitationFeatureError, canonical_bytes, digest, file_sha256, utc
 
 NETWORK = "NHDPlusv2-CONUS"
@@ -91,6 +91,7 @@ def validate_acquisition(receipt: dict, root: Path) -> None:
         verify_asset(root, record["asset"])
 
 
+@serialize_acquisition
 def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_request) -> dict:
     """Retain bounded conditional GETs; complete receipts replay without network."""
     selected = selections(request)
@@ -111,7 +112,7 @@ def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_
         if status != 200 or not 0 < size <= MAX_OBJECT or not re.fullmatch(r'"[^"\r\n]+"', etag):
             raise PrecipitationFeatureError("NWM object needs bounded size and strong ETag")
         used = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
-        if used + size > MAX_CACHE:
+        if used > MAX_CACHE:
             raise PrecipitationFeatureError("NWM retained cache exceeds 768 MiB budget")
         status, response, content = transport(
             selection["url"], method="GET", headers={"If-Match": etag}, limit=MAX_OBJECT
@@ -126,6 +127,11 @@ def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_
         import hashlib
 
         path = root / (hashlib.sha256(content).hexdigest() + ".nc")
+        # A retry may already retain these exact bytes from before its receipt
+        # was committed. Charge only new content, after bounded acquisition.
+        extra = 0 if path.exists() else len(content)
+        if used + extra > MAX_CACHE:
+            raise PrecipitationFeatureError("NWM retained cache exceeds 768 MiB budget")
         write_immutable(path, content)
         records.append(
             {
@@ -144,7 +150,10 @@ def acquire(request: dict, root: Path, *, offline: bool = False, transport=http_
         "original_publication_time": None,
     }
     receipt["acquisition_id"] = digest(receipt)
-    write_immutable(target, canonical_bytes(receipt))
+    encoded = canonical_bytes(receipt)
+    if sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) + len(encoded) > MAX_CACHE:
+        raise PrecipitationFeatureError("NWM receipt exceeds retained cache budget")
+    write_immutable(target, encoded)
     return receipt
 
 

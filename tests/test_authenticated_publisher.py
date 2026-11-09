@@ -208,8 +208,8 @@ def test_publish_authenticated_item_preserves_caller_semantics_and_portable_href
     assert item.id == publication.item_id
 
 
-def test_publisher_fails_closed_on_changed_or_duplicate_content(tmp_path: Path) -> None:
-    """Refuse tampered assets and repeated immutable Item identities."""
+def test_publisher_fails_closed_on_changed_content_and_reuses_identical_items(tmp_path: Path) -> None:
+    """Refuse tampering and conflicts while allowing an identical recovery retry."""
     catalog = _catalog(tmp_path)
     publication, manifest = _publication(tmp_path)
     changed = Path(publication.assets[1].href)
@@ -219,9 +219,13 @@ def test_publisher_fails_closed_on_changed_or_duplicate_content(tmp_path: Path) 
         publish_authenticated_item(catalog, publication, reference_path=manifest)
 
     changed.write_text('{"type":"Feature"}\n', encoding="utf-8")
-    publish_authenticated_item(catalog, publication, reference_path=manifest)
+    first = publish_authenticated_item(catalog, publication, reference_path=manifest)
+    original = Path(first.get_self_href()).read_bytes()
+    assert publish_authenticated_item(catalog, publication, reference_path=manifest).id == first.id
+    assert Path(first.get_self_href()).read_bytes() == original
     with pytest.raises(ValueError, match="already published"):
-        publish_authenticated_item(catalog, publication, reference_path=manifest)
+        publish_authenticated_item(catalog, replace(publication, properties={"example:status": "changed"}),
+                                   reference_path=manifest)
 
 
 def test_long_reference_and_asset_paths_remain_authenticated_and_portable(tmp_path: Path) -> None:

@@ -140,9 +140,11 @@ def test_transient_transport_retry_and_permanent_failure(monkeypatch):
             """Leave exceptions visible."""
             return False
 
-        def read(self, limit):
+        def read1(self, limit):
             """Return bounded fixture bytes."""
-            return b"abc"
+            content = getattr(self, "content", b"abc")
+            self.content = b""
+            return content
 
     def open_request(request, timeout):
         calls.append(request)
@@ -150,7 +152,7 @@ def test_transient_transport_retry_and_permanent_failure(monkeypatch):
             raise HTTPError(request.full_url, 503, "temporary", {}, None)
         return Response()
 
-    monkeypatch.setattr(module, "urlopen", open_request)
+    monkeypatch.setattr(module, "_open_provider_request", open_request)
     monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
     assert module.http_request("https://example.test", method="GET", headers={"If-Match": '"one"'}, limit=3) == (
         206,
@@ -163,6 +165,6 @@ def test_transient_transport_retry_and_permanent_failure(monkeypatch):
     def changed(request, timeout):
         raise HTTPError(request.full_url, 412, "changed", {}, None)
 
-    monkeypatch.setattr(module, "urlopen", changed)
+    monkeypatch.setattr(module, "_open_provider_request", changed)
     with pytest.raises(PrecipitationFeatureError, match="412"):
         module.http_request("https://example.test", method="GET", headers={}, limit=3)
