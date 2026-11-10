@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fiona==1.9.6",
+    "fiona==1.10b2",
     "geopandas==1.0.1",
     "matplotlib==3.9.0",
     "pystac==1.10.0",
