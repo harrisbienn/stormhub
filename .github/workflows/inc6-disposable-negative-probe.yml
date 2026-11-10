@@ -1,0 +1,15 @@
+name: Increment 6 disposable negative probe
+on:
+  push:
+    branches: ['codex/inc6-probe/i6-20261109-controls-v2/head']
+permissions:
+  contents: read
+jobs:
+  controlled-failure:
+    name: Increment 6 controlled failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Produce the expected failed check without reading repository files
+        shell: bash
+        run: exit 1
