@@ -187,6 +187,8 @@ def capture(report_path: Path, repository: Path) -> dict:
     """Collect the scientific test environment without invoking providers or native engines."""
     if not sys.flags.isolated or not sys.dont_write_bytecode or site.ENABLE_USER_SITE:
         raise ValueError("Invoke this helper with python -I -B")
+    if sys.prefix == sys.base_prefix:
+        raise ValueError("Use a fresh virtual environment for scientific qualification")
     prefix = Path(sys.prefix).resolve()
     content = report_path.read_bytes()
     installed = installed_distributions(metadata.distributions())
@@ -234,7 +236,8 @@ def capture(report_path: Path, repository: Path) -> dict:
                            "format_version": report["version"], "pip_version": report.get("pip_version")},
         "python": {"version": sys.version.split()[0], "implementation": platform.python_implementation(),
                    "system": platform.system(), "machine": platform.machine(),
-                   "isolated": True, "bytecode_disabled": True, "user_site": False},
+                   "isolated": True, "bytecode_disabled": True, "user_site": False,
+                   "virtual_environment": True},
         "source": source_identity(repository), "stormhub_import": stormhub_origin,
         "distributions": inventory, "native_versions": native_versions, "native_imports": native_origins,
         "unreported_bootstrap": sorted((set(installed) - set(reported)) & BOOTSTRAP),

@@ -167,3 +167,13 @@ def test_native_tuple_probe_records_actual_version():
     assert environment.version_attribute(module, "get_proj_version_tuple", call=True) == {
         "status": "known", "value": "9.5.1"
     }
+
+
+def test_capture_refuses_shared_interpreter_before_reading_report(monkeypatch):
+    """Runner-preinstalled packages must not silently satisfy scientific qualification."""
+    monkeypatch.setattr(environment, "sys", SimpleNamespace(
+        prefix="base", base_prefix="base", flags=SimpleNamespace(isolated=True), dont_write_bytecode=True
+    ))
+    monkeypatch.setattr(environment, "site", SimpleNamespace(ENABLE_USER_SITE=False))
+    with pytest.raises(ValueError, match="fresh virtual environment"):
+        environment.capture(Path("unused-report.json"), Path("unused-repository"))

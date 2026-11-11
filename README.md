@@ -153,8 +153,10 @@ receipt is not a deployment lock or approval to replace an accepted study runtim
 
 ### Scientific dependency qualification
 
-Scientific CI runs the discovered small-fixture suite on Windows and Linux with
-Python 3.12. It requires the native backends before testing, including the real
+Scientific CI creates a fresh virtual environment on Windows and Linux with
+Python 3.12 before resolving its dependencies and running the small-fixture suite.
+Runner-preinstalled packages cannot satisfy that resolution. It requires the
+native backends before testing, including the real
 DSS, GRIB and NetCDF/HDF5 readers; missing packages must not turn these checks
 into successful skips. Geometry and consolidated Zarr fixtures also exercise
 Fiona/GeoPandas and the fsspec/S3Map interface without live S3 requests. Run the
