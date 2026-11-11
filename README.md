@@ -151,6 +151,47 @@ retained as historical provenance, not a second supported installation recipe.
 CI resolves these package requirements in disposable environments; its dependency
 receipt is not a deployment lock or approval to replace an accepted study runtime.
 
+### Scientific dependency qualification
+
+Scientific CI creates a fresh virtual environment on Windows and Linux with
+Python 3.12 before resolving its dependencies and running the small-fixture suite.
+Runner-preinstalled packages cannot satisfy that resolution. It requires the
+native backends before testing, including the real
+DSS, GRIB and NetCDF/HDF5 readers; missing packages must not turn these checks
+into successful skips. Geometry and consolidated Zarr fixtures also exercise
+Fiona/GeoPandas and the fsspec/S3Map interface without live S3 requests. Run the
+same checks in a fresh environment:
+
+```bash
+python -m pip install --report scientific-install.json ".[nwm]" pytest==9.1.1
+python -m pip check
+python -I -m pytest -q -rs --strict-markers tests -m "not requires_network and not requires_hec and not large_assets"
+python -I -B .github/scripts/record_scientific_environment.py --install-report scientific-install.json --output scientific-environment.json
+```
+
+Use fresh report destinations and `MPLBACKEND=Agg` for headless validation. CI
+retains the installation report, resolved versions, native-library inventory and
+JUnit results for 90 days. The inventory distinguishes installed runtime/test
+packages, unreported bootstrap tools and the locally built StormHub source.
+Isolated build and documentation environments are outside that inventory.
+Dependency wheel digests and actual native-file identities are evidence for
+review; they do not establish that every bundled native library is vulnerability
+free or produce a self-contained deployment lock.
+
+The November 2026 refresh under
+[StormHub #34](https://github.com/harrisbienn/stormhub/issues/34) keeps the existing
+Shapely, Rasterio and Zarr lines while updating the Fiona, GeoPandas and S3 stack
+declarations. A fresh resolver may also choose newer transitive dependencies;
+its exact test environment is distinct from a retained deployment candidate.
+The legacy `env.yaml` remains historical. Only the two affected Fiona/GeoPandas
+pins in the separate documentation recipe are synchronized; the broader
+[documentation review](https://github.com/harrisbienn/stormhub/issues/30) remains
+separate. Native/input applicability and deployment adoption are tracked under
+[FloodForecast #98](https://github.com/harrisbienn/floodforecast/issues/98).
+Component changes must merge before FloodForecast changes its source pin or
+reconstructs an integration candidate. Fixture success does not authorize HEC
+execution, provider acquisition, scientific acceptance or runtime activation.
+
 ## Usage
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
 
