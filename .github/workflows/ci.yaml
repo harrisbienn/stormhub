@@ -65,6 +65,7 @@ jobs:
           tests/test_nwm_channel.py
           tests/test_nwm_state.py
           tests/test_publication_recovery.py tests/test_provider_recovery.py
+          tests/test_scientific_environment.py
       - name: Record resolved test dependencies
         run: python -m pip freeze --all
   scientific:
@@ -86,10 +87,13 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install pip==26.2.1
       - name: Install the declared scientific and research dependencies
-        run: python -m pip install ".[nwm]" pytest==9.1.1
+        run: python -m pip install --report scientific-install.json ".[nwm]" pytest==9.1.1
       - run: python -m pip check
       - name: Require native fixture backends instead of silently skipping them
-        run: python -I -c "import hecdss, h5netcdf, h5py, numpy, pyproj, rasterio, geopandas, rioxarray; import stormhub.met.storm_catalog"
+        run: >-
+          python -I -c "import hecdss, h5netcdf, h5py, numpy, pyproj, rasterio,
+          geopandas, rioxarray, fiona, fsspec, s3fs, xarray, zarr, dask.array,
+          shapely.geometry; import stormhub.met.storm_catalog"
       - name: Run discovered small-fixture scientific and security contracts
         run: >-
           python -I -m pytest -q -rs --strict-markers tests
@@ -98,6 +102,11 @@ jobs:
       - name: Record resolved scientific dependencies
         if: always()
         run: python -m pip freeze --all > scientific-dependencies.txt
+      - name: Record installed package and native-library identities
+        if: always()
+        run: >-
+          python -I -B .github/scripts/record_scientific_environment.py
+          --install-report scientific-install.json --output scientific-environment.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -105,8 +114,10 @@ jobs:
           path: |
             scientific-tests.xml
             scientific-dependencies.txt
+            scientific-install.json
+            scientific-environment.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
   distribution:
     name: Build tested distribution
     needs: [unit, scientific]
