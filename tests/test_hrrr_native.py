@@ -12,6 +12,7 @@ pytest.importorskip("pyproj")
 
 from stormhub.met.hrrr_acquisition import acquire
 from stormhub.met.hrrr_normalization import conservative_weights, normalize, remap_interval
+from stormhub.met.forecast_precipitation import from_hrrr, verify_export
 from stormhub.met.precipitation_features import SUPPORT_CONTRACT, PrecipitationFeatureError, digest
 from test_hrrr_acquisition import REQUEST, fake_provider
 
@@ -63,6 +64,9 @@ def test_decode_known_totals_and_offline_replay(tmp_path):
     assert replay == result
     for path in (tmp_path / "first").iterdir():
         assert path.read_bytes() == (tmp_path / "second" / path.name).read_bytes()
+    exported = from_hrrr(tmp_path / "first" / (result["dataset_id"] + ".json"), raw_root=raw)
+    verify_export(exported, bundle_root=tmp_path / "first", raw_root=raw)
+    assert exported == from_hrrr(tmp_path / "second" / (result["dataset_id"] + ".json"), raw_root=raw)
 
 
 def test_subset_missing_negative_and_shifted_grid(tmp_path):

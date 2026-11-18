@@ -1,0 +1,163 @@
+{
+  "contract_version": "stormhub/forecast-precipitation/1.0.0",
+  "provider": "noaa",
+  "model": "hrrr",
+  "model_version": "hrrr-v4",
+  "member": "deterministic",
+  "product": "conus-hourly-surface-apcp",
+  "adapter_version": "0.1.0",
+  "initialization": "2025-10-25T18:00:00Z",
+  "valid_start": "2025-10-25T18:00:00Z",
+  "valid_end": "2025-10-25T20:00:00Z",
+  "interval_seconds": 3600,
+  "units": "mm",
+  "source_grid": {
+    "crs": "EPSG:5070",
+    "shape": [
+      2,
+      2
+    ],
+    "transform": [
+      3000,
+      0,
+      0,
+      0,
+      -3000,
+      6000
+    ]
+  },
+  "source_grid_sha256": "4f359f441c2ae8a55b11eddadb444610a2a670b346330234febc1b0df5bb07e7",
+  "target_grid": {
+    "cell_size_meters": 1000,
+    "crs": "EPSG:5070",
+    "origin": [
+      0,
+      0
+    ],
+    "row_order": "south_to_north",
+    "shape": [
+      1,
+      2
+    ]
+  },
+  "normalized": {
+    "href": "normalized.json",
+    "sha256": "739bdb7f3e5906436b5ccd5ed56973d07bbb1558813b1c3de26c9cd5c79e3422",
+    "size_bytes": 342
+  },
+  "weights": {
+    "href": "weights.json",
+    "sha256": "f0644263947082cf994118652f271f5d66a633c3c5423839a4a47acaf4172e0b",
+    "size_bytes": 215
+  },
+  "support": {
+    "href": "support.json",
+    "sha256": "8168666fb3fbd0d135edff76ca737aafe0176fa5e4c25093f25a618fc63d4577",
+    "size_bytes": 372
+  },
+  "features": {
+    "href": "precipitation-features-88c43344935dc3eb14bbd335.json",
+    "sha256": "b209aef5fb8cee94902a9f4770954eb809bfd9f153cb60a86c355a465be7699b",
+    "size_bytes": 2140
+  },
+  "feature_id": "precipitation-features-88c43344935dc3eb14bbd335",
+  "normalization": {
+    "source_units": "kg m-2",
+    "source_measurement": "interval-depth",
+    "target_measurement": "interval-depth",
+    "method": "projected-cell-intersection-v1",
+    "accumulation_resets": "not-applicable",
+    "missingness": "null-is-missing",
+    "negative_values": "refuse",
+    "outside_support": "null-not-consumed"
+  },
+  "availability": {
+    "complete_observed_at": "2025-10-25T18:02:00Z",
+    "first_observed_at": "2025-10-25T18:01:00Z",
+    "original_publication_time": null,
+    "status": "archive-retrieval-only"
+  },
+  "available_at": "2025-10-25T18:02:00Z",
+  "source_revision": {
+    "retrieval_id": "21f66f8701bad44b18a63f61b5340c942efc186e0cd71e2e5520af191c8d32da",
+    "provider_revision": null
+  },
+  "intervals": [
+    {
+      "start": "2025-10-25T18:00:00+00:00",
+      "end": "2025-10-25T19:00:00+00:00",
+      "row": 0,
+      "values_sha256": "96e57ba456326ffcb5dd1a996b21c5983ddf62802ba3f0e8e8a9c9162a49a06a",
+      "missing_cells": 1,
+      "accumulation": {
+        "start": "2025-10-25T18:00:00+00:00",
+        "end": "2025-10-25T19:00:00+00:00",
+        "reset_at": null
+      },
+      "raw": {
+        "message": {
+          "href": "f01.grib2",
+          "sha256": "63d395e162052d1695f7f38e441f9d46d6b03b11833803e3dfb6eadcc6bba180",
+          "size_bytes": 224
+        },
+        "index": {
+          "href": "f01.idx",
+          "sha256": "87a37ff14cd5369e0c13f6c20d64299bb0f5a872592caf6a8d605b8dc36d75f6",
+          "size_bytes": 15
+        },
+        "observed_at": "2025-10-25T18:01:00Z",
+        "etag": "\"revision-1\"",
+        "byte_range": [
+          0,
+          223
+        ]
+      }
+    },
+    {
+      "start": "2025-10-25T19:00:00+00:00",
+      "end": "2025-10-25T20:00:00+00:00",
+      "row": 1,
+      "values_sha256": "6928271617835f7e77cf268a5d67b2f6df4a60868f5504193107eb14cd21b6c6",
+      "missing_cells": 1,
+      "accumulation": {
+        "start": "2025-10-25T19:00:00+00:00",
+        "end": "2025-10-25T20:00:00+00:00",
+        "reset_at": null
+      },
+      "raw": {
+        "message": {
+          "href": "f02.grib2",
+          "sha256": "67343048779770e422385a8fcc49f6ef6c4025f8cb6f57b3e23ef65aeb5607ce",
+          "size_bytes": 224
+        },
+        "index": {
+          "href": "f02.idx",
+          "sha256": "222f683c3589421e0ffc24f8b7ddc7f5b681f6926f0bd6a37153a645082adb1a",
+          "size_bytes": 15
+        },
+        "observed_at": "2025-10-25T18:02:00Z",
+        "etag": "\"revision-2\"",
+        "byte_range": [
+          0,
+          223
+        ]
+      }
+    }
+  ],
+  "provenance": {
+    "forcing": {
+      "href": "forcing-dataset-537a7cb490a9bc651b76e0e0.json",
+      "sha256": "a01450e7896ee48d78691136df2f7a253e44173872a5965855e78e6687a69976",
+      "size_bytes": 3665
+    },
+    "dataset_id": "forcing-dataset-537a7cb490a9bc651b76e0e0",
+    "contract_version": "stormhub/forcing-dataset/0.1.0",
+    "acquisition": {
+      "href": "acquisition.json",
+      "sha256": "d15264dc342640654d21d01fcebeffc8d3c38c19e431549b586fac0ca010c963",
+      "size_bytes": 1206
+    }
+  },
+  "forecast_eligible": false,
+  "export_id": "forecast-precipitation-3afcfc197d86faa3f0f27ef3"
+}
