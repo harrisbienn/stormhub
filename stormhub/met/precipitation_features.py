@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from stormhub._files import ImmutableFileConflict, atomic_write_bytes
+
 CONTRACT = "stormhub/precipitation-features/0.1.0"
 NORMALIZED_CONTRACT = "stormhub/normalized-precipitation/0.1.0"
 SUPPORT_CONTRACT = "stormhub/precipitation-support/0.1.0"
@@ -449,15 +451,12 @@ def validate_manifest(value: Mapping[str, Any]) -> None:
 
 
 def write_features(manifest: Mapping[str, Any], directory: Path) -> Path:
-    """Write an immutable content-named manifest; identical retries succeed."""
+    """Publish a complete immutable manifest atomically; identical retries succeed."""
     validate_manifest(manifest)
-    directory.mkdir(parents=True, exist_ok=True)
     path = directory / (manifest["feature_id"] + ".json")
     content = canonical_bytes(manifest) + b"\n"
     try:
-        with path.open("xb") as stream:
-            stream.write(content)
-    except FileExistsError:
-        if path.read_bytes() != content:
-            raise PrecipitationFeatureError("refusing to overwrite a different feature manifest") from None
+        atomic_write_bytes(path, content, immutable=True)
+    except ImmutableFileConflict as exc:
+        raise PrecipitationFeatureError("refusing to overwrite a different feature manifest") from exc
     return path

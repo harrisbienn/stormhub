@@ -1,11 +1,15 @@
 """Known-value contracts for rainfall descriptors, independent of HEC software."""
 
 import copy
+import errno
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
+from stormhub import _files
 from stormhub.met.precipitation_features import (
     NORMALIZED_CONTRACT,
     SUPPORT_CONTRACT,
@@ -225,6 +229,129 @@ def test_static_and_incoming_share_descriptors_and_immutable_export(rainfall, tm
     output.write_bytes(b"different")
     with pytest.raises(PrecipitationFeatureError, match="overwrite"):
         write_features(static, tmp_path)
+    assert output.read_bytes() == b"different"
     source_file.write_bytes(b"changed")
     with pytest.raises(PrecipitationFeatureError, match="checksum"):
         extract_normalized_file(source_file, **arguments)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_interrupted_feature_staging_is_retryable(rainfall, tmp_path, monkeypatch, partial):
+    """A failed feature write never exposes a partial final manifest."""
+    normalized, arguments = rainfall
+    manifest = extract_features(normalized, **arguments)
+    path = tmp_path / (manifest["feature_id"] + ".json")
+    write = _files._write_content
+
+    def interrupted(stream, content):
+        if partial:
+            stream.write(content[:3])
+            stream.flush()
+        raise OSError("injected feature interruption")
+
+    monkeypatch.setattr(_files, "_write_content", interrupted)
+    with pytest.raises(OSError, match="injected feature interruption"):
+        write_features(manifest, tmp_path)
+    assert not path.exists()
+    assert not list(tmp_path.glob(".stormhub-*.tmp"))
+    monkeypatch.setattr(_files, "_write_content", write)
+    assert write_features(manifest, tmp_path) == path
+    assert path.read_bytes() == canonical_bytes(manifest) + b"\n"
+
+
+def test_reader_sees_no_manifest_until_staging_completes(rainfall, tmp_path, monkeypatch):
+    """A concurrent reader sees no final path while a partial stage is paused."""
+    normalized, arguments = rainfall
+    manifest = extract_features(normalized, **arguments)
+    path = tmp_path / (manifest["feature_id"] + ".json")
+    staged, release = Event(), Event()
+    write = _files._write_content
+
+    def paused(stream, content):
+        stream.write(content[:3])
+        stream.flush()
+        staged.set()
+        assert release.wait(timeout=10)
+        write(stream, content[3:])
+
+    monkeypatch.setattr(_files, "_write_content", paused)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        writer = executor.submit(write_features, manifest, tmp_path)
+        try:
+            assert staged.wait(timeout=10)
+            assert not path.exists()
+        finally:
+            release.set()
+        assert writer.result(timeout=10) == path
+    assert path.read_bytes() == canonical_bytes(manifest) + b"\n"
+    assert json.loads(path.read_bytes()) == manifest
+
+
+def _feature_writer(manifest, root, ready, results):
+    ready.wait(timeout=15)
+    results.put(write_features(manifest, root).name)
+
+
+def test_concurrent_identical_feature_publishers(rainfall, tmp_path):
+    """Independent processes coalesce an identical manifest without changing bytes."""
+    from test_publication_recovery import _parallel
+
+    normalized, arguments = rainfall
+    manifest = extract_features(normalized, **arguments)
+    outcomes = _parallel(_feature_writer, [(manifest, tmp_path), (manifest, tmp_path)])
+    assert outcomes == [manifest["feature_id"] + ".json"] * 2
+    assert (tmp_path / outcomes[0]).read_bytes() == canonical_bytes(manifest) + b"\n"
+    assert not list(tmp_path.glob(".stormhub-*.tmp"))
+
+
+def test_competing_feature_destination_is_preserved(rainfall, tmp_path, monkeypatch):
+    """A conflicting destination created during staging retains its original bytes."""
+    normalized, arguments = rainfall
+    manifest = extract_features(normalized, **arguments)
+    path = tmp_path / (manifest["feature_id"] + ".json")
+    link = _files.os.link
+
+    def competing_link(source, destination):
+        destination.write_bytes(b"different accepted bytes")
+        link(source, destination)
+
+    monkeypatch.setattr(_files.os, "link", competing_link)
+    with pytest.raises(PrecipitationFeatureError, match="refusing to overwrite a different feature manifest"):
+        write_features(manifest, tmp_path)
+    assert path.read_bytes() == b"different accepted bytes"
+    assert not list(tmp_path.glob(".stormhub-*.tmp"))
+
+
+def test_feature_publication_failure_after_link_is_idempotent(rainfall, tmp_path, monkeypatch):
+    """A failure after final publication leaves complete evidence for an identical retry."""
+    normalized, arguments = rainfall
+    manifest = extract_features(normalized, **arguments)
+    path = tmp_path / (manifest["feature_id"] + ".json")
+    sync = _files._sync_directory
+
+    def interrupted(directory):
+        raise OSError("injected post-publication interruption")
+
+    monkeypatch.setattr(_files, "_sync_directory", interrupted)
+    with pytest.raises(OSError, match="post-publication interruption"):
+        write_features(manifest, tmp_path)
+    assert path.read_bytes() == canonical_bytes(manifest) + b"\n"
+    assert not list(tmp_path.glob(".stormhub-*.tmp"))
+    monkeypatch.setattr(_files, "_sync_directory", sync)
+    assert write_features(manifest, tmp_path) == path
+
+
+def test_feature_publication_requires_atomic_hard_links(rainfall, tmp_path, monkeypatch):
+    """An unsupported filesystem refuses publication instead of exposing a partial copy."""
+    normalized, arguments = rainfall
+    manifest = extract_features(normalized, **arguments)
+    path = tmp_path / (manifest["feature_id"] + ".json")
+
+    def unsupported_link(source, destination):
+        raise OSError(errno.ENOTSUP, "hard links unavailable")
+
+    monkeypatch.setattr(_files.os, "link", unsupported_link)
+    with pytest.raises(OSError, match="hard links unavailable"):
+        write_features(manifest, tmp_path)
+    assert not path.exists()
+    assert not list(tmp_path.glob(".stormhub-*.tmp"))
