@@ -62,6 +62,7 @@ jobs:
           tests/test_scenario_publisher.py tests/test_scenario_response.py
           tests/test_scenario_stac.py tests/test_precipitation_features.py tests/test_hrrr_acquisition.py
           tests/test_forecast_precipitation.py
+          tests/test_model_domain_precipitation.py
           tests/test_mrms_precipitation.py
           tests/test_nwm_channel.py
           tests/test_nwm_state.py
