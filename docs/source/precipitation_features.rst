@@ -138,6 +138,85 @@ and `GDAL GRIB metadata <https://gdal.org/en/stable/drivers/raster/grib.html>`_.
 The synthetic saved GRIB fixtures under ``tests/fixtures/hrrr`` have known
 hourly totals and a reproducible generator; native tests replay them offline.
 
+Model-neutral forecast export
+-----------------------------
+
+``stormhub.met.forecast_precipitation`` owns the reusable
+``stormhub/forecast-precipitation/1.0.0`` export. It describes one deterministic
+forecast source independently of a consumer's cycle, event or model window.
+The initial registered product is NOAA HRRR v4 deterministic CONUS hourly
+surface APCP. No additional model has been selected or implemented by this
+contract; unknown provider/model/version/member/product/adapter combinations
+fail before publication. No dynamic plugin import, blending or implicit source
+substitution is supported.
+
+Project a retained HRRR bundle without acquisition or native decoding::
+
+    from pathlib import Path
+    from stormhub.met.forecast_precipitation import from_hrrr, write_export
+
+    bundle = Path("retained/normalized-hrrr")
+    raw = Path("retained/raw-hrrr")
+    exported = from_hrrr(bundle / "forcing-dataset-<id>.json", raw_root=raw)
+    path = write_export(exported, Path("exports"), bundle_root=bundle, raw_root=raw)
+
+The wrapper retains the original model version from the request, checks it with
+the existing HRRR validator and independently checks the retained decoded hourly
+accumulation tags. It verifies acquisition, normalized values, grid/weights,
+support and features before producing the new receipt. Existing forcing,
+acquisition and feature artifacts, their hashes and their identities stay
+unchanged. The new receipt references them; it does not relabel them as a new
+legacy dataset.
+
+Top-level consumer fields are ``provider``, ``model``, ``model_version``,
+``member``, ``product``, ``adapter_version``, ``initialization``,
+``valid_start``, ``valid_end``, ``interval_seconds``, ``units`` (normalized mm),
+``source_grid_sha256`` and ``available_at``. ``export_id`` is
+``forecast-precipitation-`` plus the first 24 characters of the canonical SHA-256
+over the receipt excluding that field. Consumers must also bind the full receipt
+byte checksum. Every interval records its row, time bounds, normalized-values
+hash, missing-cell count, source accumulation interval/reset origin and owned
+raw evidence. Null remains missing; zero remains a measured dry depth.
+
+The common envelope validates identity, the normalized grid and contiguous
+interval rows. A fixed product-policy table supplies product-specific semantic
+validation and retained-byte verification. HRRR's policy requires exact hourly
+accumulations and no reset; cumulative fields, reset fields and rate substitutions
+are refused instead of being silently differenced. The envelope can represent a
+longer source accumulation and explicit reset origin for a future registered
+policy. That policy must implement and test its own supported conversion before
+acceptance. A future model supplies its own ``provenance``, ``raw`` and source-grid
+evidence through the same dispatch boundary; it need not impersonate an HRRR
+legacy receipt.
+
+For HRRR, ``available_at`` equals the latest raw-byte client retrieval observation,
+also retained as ``availability.complete_observed_at``. It does not mean original
+provider publication, historical normalized-output availability or verified as-of
+hindcast evidence. ``source_revision.retrieval_id`` is the acquisition identity;
+provider revision remains null because the legacy source does not establish it.
+Changed retained source bytes/ETags produce another acquisition/export identity;
+they never silently revise an existing export. Consumers retain their own actual
+bundle observation/freeze evidence and must not backdate it to raw retrieval.
+
+``validate_export`` checks structure and semantics without I/O;
+``verify_export`` also authenticates retained assets and reproduces the selected
+owner projection. ``write_export`` performs that verification before creating its
+output and uses the existing atomic immutable publisher. Bundle descriptors
+resolve beneath the explicitly bound ``bundle_root``; interval raw descriptors
+resolve beneath ``raw_root``. The output directory contains only the new receipt
+and does not change those roots. Roots must remain under trusted writer control
+during verification/publication.
+
+FloodForecast owns issue/cutoff/freeze clocks, selected source intervals, physical
+model windows, qualification and forecast-cycle projection. This new boundary
+does not consume FloodForecast schemas. The historical event assembler below
+retains its existing compatibility contract. Its reverse schema dependency and
+the broader rainfall facade remain explicit SH-10 follow-up seams under
+``floodforecast#319``; adding another product, another consumer or another event
+selection contract triggers a separate owning adapter/refactor increment.
+All exports remain ``forecast_eligible=false``. A valid portable receipt does not
+qualify model-domain coverage, native DSS writing, model skill or operation.
+
 MRMS observations and selected events
 -------------------------------------
 
