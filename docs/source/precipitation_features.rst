@@ -18,6 +18,15 @@ adapters in ``precipitation_adapters`` and the HRRR adapter in
 units, clocks, row order, interval accumulation, and missingness before using
 it. NWM streamflow is not a rainfall input.
 
+``write_features`` publishes the validated, content-named feature manifest using
+the same atomic immutable filesystem boundary as provider payloads and receipts.
+The final path becomes visible only after the complete canonical JSON plus its
+trailing newline has been staged and flushed. An identical retry preserves the
+accepted bytes; conflicting bytes raise ``PrecipitationFeatureError`` without
+replacement. Feature identities and serialization are unchanged. The filesystem,
+abandoned-stage and explicit-quarantine limits in the recovery section below
+also apply to feature exports.
+
 Bounded HRRR research forcing
 ----------------------------
 
@@ -297,3 +306,35 @@ Optional native/geometry checks, with existing scientific dependencies::
 
 The native test creates a tiny real DSS in temporary storage. Neither test
 suite requires installed HEC-HMS or HEC-RAS or large production assets.
+
+Issue 31 implementation scope (November 18, 2026)
+-------------------------------------------------
+
+The shared atomic/provider recovery implementation was already present at
+``f343ca4b4027c53d6da39935a12cc9b7ed016d2f``. The remaining feature-export gap
+is addressed by applying that existing primitive to ``write_features``. No
+provider format, transport policy, contract version or scientific calculation
+changes in this increment.
+
+The original issue's acceptance obligations are accounted for as follows:
+
+* Payload/receipt interruption and identical concurrent acquisition are covered
+  by ``tests/test_provider_recovery.py``; generic conflicting process publishers
+  are covered by ``tests/test_publication_recovery.py``. Feature export adds its
+  own before/during-stage failure, concurrent reader, identical process writer,
+  conflicting destination, unsupported-filesystem and post-publication retry
+  cases in ``tests/test_precipitation_features.py``.
+* Actual-byte limits, certificate rejection, redirect origin/scheme/method/header
+  rules and slow-stream deadlines are exercised by controlled urllib fixtures
+  in ``tests/test_provider_recovery.py``. Transient versus permanent retries are
+  covered by ``tests/test_hrrr_acquisition.py``. Requests-specific checks are not
+  substituted for urllib evidence.
+* The 180-second cooperative deadline is per HTTP call, not per complete
+  acquisition; DNS and blocked OS calls still require an outer process deadline.
+  The per-adapter request/object/cache and MRMS expansion limits remain those
+  documented here and in the NWM contract pages. No total-acquisition wall-clock
+  guarantee is newly claimed.
+* These portable fixtures do not qualify a remote filesystem, a live provider,
+  native decoders or engineering execution. Catalog transactions remain issue
+  12, and deployment-specific storage/native/large-acquisition evidence remains
+  separate. This source change does not close those obligations.
