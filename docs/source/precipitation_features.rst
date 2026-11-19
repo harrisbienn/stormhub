@@ -417,3 +417,113 @@ The original issue's acceptance obligations are accounted for as follows:
   native decoders or engineering execution. Catalog transactions remain issue
   12, and deployment-specific storage/native/large-acquisition evidence remains
   separate. This source change does not close those obligations.
+
+Complete model-domain forecast rainfall
+---------------------------------------
+
+``stormhub.met.model_domain_precipitation`` adds a separate
+``stormhub/model-domain-precipitation/1.0.0`` receipt around the unchanged
+``stormhub/forecast-precipitation/1.0.0`` source. A selected research support
+cannot establish complete model forcing. Supply an explicit
+``stormhub/model-forcing-domain/1.0.0`` declaration containing the target grid,
+sorted required-cell indices, and the SHA256 of the model owner's domain
+evidence. Its content identity binds the entire declaration. This is a union
+of complete grid cells, not fractional basin areas, a ranking domain, or an
+inferred mask of the cells that happened to contain rain.
+
+The model owner must establish that this declaration covers the intended model.
+StormHub verifies rainfall completeness against it; software cannot establish
+model approval merely from the declaration's name or hash. Admission therefore
+requires the independently selected ``expected_domain``, rather than trusting
+the domain embedded in an incoming receipt. A rehashed smaller mask cannot
+substitute for the caller's expected domain.
+
+Use the existing scientific environment and retained acquisition bytes::
+
+    from stormhub.met.model_domain_precipitation import (
+        new_domain, normalize_hrrr, verify_export,
+    )
+
+    domain = new_domain(
+        grid=model_grid,
+        required_cells=required_model_cells,
+        model_domain_sha256=model_domain_evidence_sha256,
+    )
+    exported = normalize_hrrr(
+        acquisition, raw_root,
+        domain=domain,
+        output=bundle_root,
+        revision=actual_stormhub_revision,
+        dirty=actual_checkout_dirty,
+    )
+    verify_export(
+        exported, expected_domain=domain,
+        bundle_root=bundle_root, raw_root=raw_root,
+    )
+
+No provider request occurs in these functions. ``normalize_hrrr`` uses the
+existing hourly normalizer with support derived from every required model cell.
+``from_forecast`` can verify an already retained F02 source with exactly that
+support. The source envelope, raw acquisition identities, availability clocks,
+normalization assets, features and producer provenance remain intact. New
+products require both F02 conformance and an explicit model-domain native
+verifier; arbitrary product names never fall through to HRRR.
+
+``validate_export`` checks portable semantic identities only.
+``verify_export`` authenticates every retained source artifact and independently
+decodes the retained GRIB2 messages. It rebuilds the full conservative remapping
+matrix, compares it with the retained matrix, recomputes each required cell's
+depth, and verifies per-interval area and volume conservation. Merely rehashing
+invented normalized data or recomputing its feature summaries cannot pass.
+Native bytes are checked before and after decoding. ``write_export`` verifies
+before immutable publication; identical retries preserve bytes, and changed
+inputs, domain, policy or producer create a different identity.
+
+The versioned ``stormhub/model-domain-normalization/1.0.0`` policy fixes:
+
+* projected-cell intersections with four edge segments, complete cell coverage
+  within 1e-7, and the common projected footprint used for volume accounting;
+* millimetre interval depth, with no cumulative differencing, resets, temporal
+  interpolation, tail padding or mixing of forecast vintages;
+* start-exclusive/end-inclusive accumulation intervals, contiguous exact
+  endpoints, and an optional observed-end declaration equal to source start;
+* mandatory finite nonnegative values for every required cell and every source
+  interval, with outside-domain cells retained as null and never consumed;
+* native depth comparison within 1e-9 mm absolute or 1e-10 relative error, and
+  volume error within the larger of 1e-6 m3 or source volume times 1e-10.
+
+The optional ``observed_end`` declares only the seam at the complete source's
+``valid_start``. It includes no observed values or availability proof. Selecting
+a later forecast suffix at a new observed cutoff belongs to the consuming
+cycle/materialization contract, which must independently authenticate the
+observed prefix on the same complete domain. This API never selects that
+suffix implicitly.
+
+Current limits are 250,000 raster cells, 50,000 required cells, and the existing
+remapper's 100,000-cell native bounding window. Exceeding them refuses rather
+than cropping the domain. The projected metre CRS and full native coverage
+remain mandatory. Retained matrix comparison is exact: numerical dependency
+changes that alter intersections require regeneration and a new source identity,
+not silent acceptance of stale weights. Producer records retain code, revision,
+dirty status, scientific dependencies and GDAL identity.
+
+F06 (``harrisbienn/hms-commander#60``) owns DSS materialization and readback.
+Its current grid writer requires finite values for all cells; accepting this
+contract's explicit outside-domain nulls requires a reviewed mask/NoData
+extension there. Never convert those nulls into dry zero rainfall to satisfy
+the older writer. Neither this export nor complete domain coverage grants
+native execution approval, validated forecast skill or eligibility:
+``forecast_eligible`` stays false. Full observed-domain preparation and selected
+window admission remain downstream work. No HMS/RAS project files are edited.
+
+Offline contract checks::
+
+    python -I -m pytest -q tests/test_model_domain_precipitation.py tests/test_model_domain_native.py
+
+The native fixtures decode two small retained GRIB2 hours over sixteen cells:
+36,000,000 m2 with 90,000 and 180,000 m3 interval volumes. They cover replay,
+outside-domain masks, wrong roots, an uncovered extent, corrupted assets,
+rehashed missing/invented rainfall and omitted remapping cells. Existing HRRR
+tests additionally cover accumulation semantics, missing/negative native cells
+and cross-CRS conservation. These are synthetic software checks, not basin
+qualification or a live-provider demonstration.
