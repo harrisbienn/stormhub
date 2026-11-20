@@ -140,6 +140,7 @@ class PopulationContext:
             "method": {
                 "id": TRANSPOSITION_METHOD, "first_nonempty_strides_cells": list(TRANSLATION_STRIDES),
                 "rank_order": "descending-mean", "declustering_buffer_hours": DECLUSTERING_BUFFER_HOURS,
+                "declustering_horizon": "through-final-candidate-end-plus-buffer",
             },
         }
 
