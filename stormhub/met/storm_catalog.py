@@ -28,7 +28,9 @@ from pystac.extensions.file import FileExtension
 from stormhub.hydro_domain import HydroDomain
 from stormhub.logger import initialize_logger
 from stormhub.met.analysis import StormAnalyzer
-from stormhub.met.population_accounting import PopulationAttempt, PopulationFailure, completed_dates
+from stormhub.met.population_accounting import PopulationAttempt, PopulationFailure
+from stormhub.met.consts import STATS_HEADER, TRANSLATION_STRIDES
+from stormhub.met.transpose import NoValidPlacementError
 from stormhub.met.aorc.aorc import AORCItem, valid_spaces_item
 from stormhub.met.zarr_to_dss import (
     get_aorc_paths,
@@ -46,6 +48,10 @@ from stormhub.utils import (
     sha256_multihash,
     validate_config,
 )
+
+
+def _failure_reason(error: Exception) -> str:
+    return NoValidPlacementError.code if isinstance(error, NoValidPlacementError) else type(error).__name__
 
 
 def get_meteorological_season(month: int) -> str:
@@ -790,6 +796,7 @@ def storm_search(
             "storm_date": storm_start_date.strftime("%Y-%m-%dT%H"),
             "centroid": centroid,
             "aorc:statistics": event_stats,
+            "translation_stride_cells": event_item.properties["stormhub:transposition_search"]["stride_cells"],
         }
         del event_item
         gc.collect()
@@ -817,9 +824,7 @@ def serial_processor(
         with_tb (bool): Whether to include traceback in error logs.
         overwrite_output (bool): Whether to overwrite the output CSV before processing.
     """
-    if overwrite_output or not os.path.exists(output_csv):
-        with open(output_csv, "w", encoding="utf-8") as f:
-            f.write("storm_date,min,mean,max,x,y\n")
+    prepare_stats_csv(output_csv, overwrite_output)
 
     count = len(event_dates)
 
@@ -834,7 +839,7 @@ def serial_processor(
                 logging.info("%s processed (%d remaining)", r["storm_date"], count)
                 count -= 1
             except Exception as e:
-                failed[date.isoformat()] = type(e).__name__
+                failed[date.isoformat()] = _failure_reason(e)
                 if with_tb:
                     tb = traceback.format_exc()
                     logging.error("Error processing: %s\n%s", e, tb)
@@ -880,9 +885,7 @@ def multi_processor(
         executor_class = ProcessPoolExecutor
         mp_context = multiprocessing.get_context("spawn")
 
-    if overwrite_output or not os.path.exists(output_csv):
-        with open(output_csv, "w", encoding="utf-8") as f:
-            f.write("storm_date,min,mean,max,x,y\n")
+    prepare_stats_csv(output_csv, overwrite_output)
 
     count = len(event_dates)
 
@@ -917,7 +920,7 @@ def multi_processor(
                         del r
 
                     except Exception as e:
-                        failed[futures[future].isoformat()] = type(e).__name__
+                        failed[futures[future].isoformat()] = _failure_reason(e)
                         if with_tb:
                             tb = traceback.format_exc()
                             logging.error("Error processing: %s\n%s", e, tb)
@@ -1095,7 +1098,7 @@ def create_items(
                     logging.info("%s processed (%d remaining)", r.datetime, count)
 
             except Exception as e:
-                failed[futures[future]] = type(e).__name__
+                failed[futures[future]] = _failure_reason(e)
                 if with_tb:
                     tb = traceback.format_exc()
                     logging.error("Error processing: %s\n%s", e, tb)
@@ -1318,6 +1321,17 @@ def get_item_from_catalog_link(links: list, link_title: str, spm: StacPathManage
     return item
 
 
+def prepare_stats_csv(output_csv: str, overwrite: bool = False) -> None:
+    """Require a compatible header before appending new-method search results."""
+    path = Path(output_csv)
+    if overwrite or not path.exists():
+        path.write_text(STATS_HEADER + "\n", encoding="utf-8")
+        return
+    with path.open(encoding="utf-8-sig") as stream:
+        if stream.readline().rstrip("\r\n") != STATS_HEADER:
+            raise ValueError("Cannot resume unversioned statistics without reviewed checkpoint adoption")
+
+
 def storm_search_results_to_csv_line(storm_search_results: dict) -> str:
     """
     Convert storm search results to a CSV line.
@@ -1333,7 +1347,10 @@ def storm_search_results_to_csv_line(storm_search_results: dict) -> str:
     storm_date = storm_search_results["storm_date"]
     centroid = storm_search_results["centroid"]
     stats = f"{event_stats['min']},{event_stats['mean']},{event_stats['max']}"
-    return f"{storm_date},{stats},{centroid.x},{centroid.y}\n"
+    stride = storm_search_results["translation_stride_cells"]
+    if type(stride) is not int or stride not in TRANSLATION_STRIDES:
+        raise ValueError(f"Unexpected transposition stride for {storm_date}: {stride}")
+    return f"{storm_date},{stats},{centroid.x},{centroid.y},{stride}\n"
 
 
 def clean_storm_stats_csv(file_path: str, backup: bool = True) -> dict:
@@ -2500,10 +2517,12 @@ def resume_collection(
     collection_id = storm_catalog.spm.storm_collection_id(storm_duration)
     partial_stats_csv = os.path.join(storm_catalog.spm.collection_dir(collection_id), "storm-stats.csv")
     logging.info("Searching for missing storm dates in %s", partial_stats_csv)
+    if os.path.isfile(partial_stats_csv):
+        prepare_stats_csv(partial_stats_csv)
     if attempt is None:
         dates = find_missing_storm_dates(partial_stats_csv, start_date, end_date, every_n_hours=check_every_n_hours)
     else:
-        seen = completed_dates(Path(partial_stats_csv))
+        seen = set(attempt.completed_placements())
         if not seen <= attempt.dates:
             raise ValueError("Checkpoint contains a date outside the frozen search roster")
         dates = [datetime.strptime(value, "%Y-%m-%dT%H") for value in sorted(attempt.dates - seen)]

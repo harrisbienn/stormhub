@@ -15,7 +15,7 @@ import pystac
 from stormhub.met.catalog_setup import load_catalog_settings
 from stormhub.met import storm_catalog as storms
 from stormhub._files import atomic_write_bytes, exclusive_file_lock
-from stormhub.met.consts import DECLUSTERING_BUFFER_HOURS, TRANSLATION_STRIDE_CELLS
+from stormhub.met.consts import DECLUSTERING_BUFFER_HOURS, TRANSLATION_STRIDES, TRANSPOSITION_METHOD
 from stormhub.met.population_accounting import PopulationAttempt
 
 
@@ -135,16 +135,16 @@ class PopulationContext:
         else:
             roster = [_utc_date(date) for date in dates]
         return {
-            "version": 2, "catalog_id": self.settings["catalog_id"], "inputs_sha256": hashes, "search": search,
+            "version": 3, "catalog_id": self.settings["catalog_id"], "inputs_sha256": hashes, "search": search,
             "requested_starts_utc": [date.strftime("%Y-%m-%dT%H") for date in roster],
             "method": {
-                "id": "aorc-maximum-mean-transposition-v1", "translation_stride_cells": TRANSLATION_STRIDE_CELLS,
+                "id": TRANSPOSITION_METHOD, "first_nonempty_strides_cells": list(TRANSLATION_STRIDES),
                 "rank_order": "descending-mean", "declustering_buffer_hours": DECLUSTERING_BUFFER_HOURS,
             },
         }
 
 
-def _run_population(context, record, operation, options, *, fresh):
+def _run_population(context, record, operation, options, *, fresh, adoption_receipt=None):
     settings_path = context.directory / "population-settings.json"
     # All duration finalizers share the root catalog. Refuse concurrent cooperating writers.
     lock = context.catalog_file.parent / ".population.lock"
@@ -158,13 +158,37 @@ def _run_population(context, record, operation, options, *, fresh):
             path.is_dir() and path.name != "population-attempts" for path in context.directory.iterdir()
         ):
             raise ValueError("Population refuses existing Item or collection products")
-        attempt = PopulationAttempt(context.directory, record["requested_starts_utc"],
-                                    hashlib.sha256(settings_path.read_bytes()).hexdigest())
+        attempt = PopulationAttempt(
+            context.directory, record["requested_starts_utc"],
+            hashlib.sha256(settings_path.read_bytes()).hexdigest(), adopted=adoption_receipt is not None,
+        )
         with attempt.track():
+            if adoption_receipt is not None:
+                prepare_adopted_statistics(context.directory / "storm-stats.csv", adoption_receipt)
             result = operation(str(context.catalog_file), attempt=attempt, **options)
             if result is None:
                 raise RuntimeError("Population produced no collection; inspect the attempt and storm statistics")
     return result
+
+
+def statistics_rows_sha256(rows: list[str]) -> str:
+    """Identify historical CSV records independently of their encoding and line endings."""
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def prepare_adopted_statistics(path: Path, receipt: dict) -> None:
+    """Upgrade only the verified working copy. Historical rows have no observed stride."""
+    payload = path.read_bytes()
+    lines = payload.decode("utf-8-sig").splitlines()
+    if lines and lines[0] == storms.STATS_HEADER:
+        historical = [line.rsplit(",", 1)[0] for line in lines[1:] if line.endswith(",legacy_unrecorded")]
+        if statistics_rows_sha256(historical) != receipt["statistics_rows_sha256"]:
+            raise ValueError("Historical rows differ from the adopted checkpoint")
+        return  # A previous resume already upgraded this working copy.
+    if hashlib.sha256(payload).hexdigest() != receipt["statistics_sha256"]:
+        raise ValueError("Adopted statistics differ from the archived checkpoint")
+    rows = [storms.STATS_HEADER, *(line + ",legacy_unrecorded" for line in lines[1:] if line)]
+    atomic_write_bytes(path, ("\n".join(rows) + "\n").encode("utf-8"), immutable=False)
 
 
 def _workers(context: PopulationContext, num_workers: int | None) -> dict[str, Any]:
@@ -255,7 +279,7 @@ def resume_catalog(
         return {"operation": "resume", "catalog": str(context.catalog_file), **expected, **workers}
     return _run_population(context, expected, storms.resume_collection,
                            {**{k: v for k, v in search.items() if k != "specific_dates"}, **workers, "with_tb": with_tb},
-                           fresh=False)
+                           fresh=False, adoption_receipt=evidence if adoption is not None else None)
 
 
 def export_catalog_dss(

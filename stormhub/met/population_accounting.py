@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from stormhub._files import atomic_write_bytes
+from stormhub.met.consts import STATS_HEADER, TRANSLATION_STRIDES, TRANSPOSITION_METHOD
 
 
 class PopulationFailure(RuntimeError):
@@ -21,14 +22,15 @@ class PopulationFailure(RuntimeError):
         super().__init__(f"{stage}: {len(failed)} failed member(s), first: {next(iter(failed))}")
 
 
-def completed_dates(path: Path) -> set[str]:
-    """Read an interrupted or complete statistics checkpoint without changing its bytes."""
-    seen = set()
+def _read_placements(path: Path, *, adopted: bool) -> dict[str, int | None]:
+    """Read and validate the actual spacing for every checkpoint row."""
+    seen = {}
     if not path.exists():
         return seen
+    valid_spacings = {str(stride) for stride in TRANSLATION_STRIDES}
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream, strict=True)
-        if reader.fieldnames != ["storm_date", "min", "mean", "max", "x", "y"]:
+        if reader.fieldnames != STATS_HEADER.split(","):
             raise ValueError("Unexpected storm-stats.csv columns")
         for row in reader:
             if None in row or None in row.values():
@@ -42,23 +44,31 @@ def completed_dates(path: Path) -> set[str]:
                 or not values[0] <= values[1] <= values[2]
             ):
                 raise ValueError(f"Duplicate date or invalid checkpoint statistics at row {reader.line_num}")
-            seen.add(date)
+            spacing = row["translation_stride_cells"]
+            if adopted and spacing == "legacy_unrecorded":
+                seen[date] = None
+            elif spacing in valid_spacings:
+                seen[date] = int(spacing)
+            else:
+                raise ValueError(f"Invalid checkpoint stride for {date}: {spacing}")
     return seen
 
 
 class PopulationAttempt:
     """Retain separate attempts; a crash never produces a successful completion receipt."""
 
-    def __init__(self, directory: Path, dates: list[str], settings_sha256: str):
+    def __init__(self, directory: Path, dates: list[str], settings_sha256: str, *, adopted: bool = False):
         parent = directory / "population-attempts"
         if parent.resolve() != parent:
             raise ValueError("Unsafe population-attempts directory")
         parent.mkdir(exist_ok=True)
         self.path = parent / f"{uuid4().hex}.json"
         self.stats = directory / "storm-stats.csv"
+        self.adopted = adopted
+        self.placements: dict[str, int | None] = {}
         self.dates = set(dates)
         self.record = {
-            "version": 1,
+            "version": 2,
             "settings_sha256": settings_sha256,
             "status": "running",
             "phase": "search",
@@ -72,11 +82,24 @@ class PopulationAttempt:
         content = json.dumps(self.record, sort_keys=True, separators=(",", ":")) + "\n"
         atomic_write_bytes(self.path, content.encode(), immutable=False)
 
+    def completed_placements(self) -> dict[str, int | None]:
+        """Validate the statistics bytes currently on disk."""
+        return _read_placements(self.stats, adopted=self.adopted)
+
+    def _record_search(self) -> tuple[set[str], set[str]]:
+        self.placements = self.completed_placements()
+        seen = set(self.placements)
+        missing, unexpected = self.dates - seen, seen - self.dates
+        self.record["search"].update(
+            completed=sorted(seen), missing=sorted(missing), unexpected=sorted(unexpected),
+            fallback_dates=sorted(date for date, stride in self.placements.items() if stride == 1),
+            legacy_unrecorded=sorted(date for date, stride in self.placements.items() if stride is None),
+        )
+        return missing, unexpected
+
     def check_search(self) -> None:
         """Require exact requested date coverage before ranking."""
-        seen = completed_dates(self.stats)
-        missing, unexpected = self.dates - seen, seen - self.dates
-        self.record["search"].update(completed=sorted(seen), missing=sorted(missing), unexpected=sorted(unexpected))
+        missing, unexpected = self._record_search()
         self.save()
         if missing or unexpected:
             raise ValueError(f"Search roster mismatch: {len(missing)} missing, {len(unexpected)} unexpected")
@@ -103,6 +126,16 @@ class PopulationAttempt:
                 item = json.loads(path.read_bytes())
                 start = datetime.fromisoformat(item["properties"]["start_datetime"].replace("Z", "+00:00"))
                 end = datetime.fromisoformat(item["properties"]["end_datetime"].replace("Z", "+00:00"))
+                method = item["properties"]["stormhub:transposition_search"]
+                stride = method["stride_cells"]
+                observed = self.placements[date]
+                if (
+                    method["method"] != TRANSPOSITION_METHOD
+                    or type(stride) is not int
+                    or stride not in TRANSLATION_STRIDES
+                    or (observed is not None and observed != stride)
+                ):
+                    raise ValueError("Ranked Item transposition differs from its search")
                 if (
                     item.get("type") == "Feature"
                     and item.get("id") == item_id
@@ -137,10 +170,7 @@ class PopulationAttempt:
                 self.record["worker_failures"] = error.failed
             if self.record["phase"] == "search":
                 try:
-                    seen = completed_dates(self.stats)
-                    self.record["search"].update(
-                        completed=sorted(seen), missing=sorted(self.dates - seen), unexpected=sorted(seen - self.dates)
-                    )
+                    self._record_search()
                 except (OSError, ValueError, csv.Error) as checkpoint_error:
                     self.record["checkpoint_error"] = type(checkpoint_error).__name__
             self.save()

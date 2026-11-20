@@ -14,7 +14,7 @@ import shutil
 from uuid import uuid4
 import zipfile
 
-from stormhub.met.catalog_population import PopulationContext, resume_catalog
+from stormhub.met.catalog_population import PopulationContext, resume_catalog, statistics_rows_sha256
 
 
 def _json_bytes(value: dict) -> bytes:
@@ -134,7 +134,9 @@ def adopt_checkpoint(
 
     CSV dates/values are checked, but historical geometry and kernel settings
     cannot be inferred from CSV alone. ``settings_confirmed`` attests that all
-    retained rows used the displayed method, temporal selection, duration and domain inputs. A stopped smoke
+    retained rows used the displayed duration, temporal selection, domain and compatible search
+    settings. Successful historical four-cell placements are compatible with
+    the four-first method. A stopped smoke
     checkpoint can seed a full search when its rows meet that same contract.
 
     Execution requires the fingerprint from a stopped-writer dry run. Source
@@ -205,6 +207,9 @@ def adopt_checkpoint(
         "archive_sha256": archive_sha,
         "provenance": provenance,
         "statistics_sha256": inventory[stats_name]["sha256"],
+        "statistics_rows_sha256": statistics_rows_sha256(
+            [line for line in stats.decode("utf-8-sig").splitlines()[1:] if line]
+        ),
     }
     receipt_path = backup / "receipt.json"
     receipt_path.write_bytes(_json_bytes(receipt))

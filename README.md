@@ -195,6 +195,18 @@ execution, provider acquisition, scientific acceptance or runtime activation.
 ## Usage
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
 
+New AORC searches use `aorc-maximum-mean-transposition-v2`. StormHub first
+tries watershed placements four raster cells apart in both axes. Only an empty
+set of valid placements triggers a one-cell search on the same grid and mask.
+The first nonempty set supplies both the valid area and the maximum-mean
+placement. An empty exhaustive search raises `no_valid_placement`. I/O or
+worker errors propagate separately. New statistics rows record
+`translation_stride_cells`, and ranked Items record the method and effective
+stride under `stormhub:transposition_search`. For a reviewed legacy checkpoint,
+confirm compatible source settings before adoption. Its archive retains the
+original bytes. On resume its working CSV labels the historical spacing
+`legacy_unrecorded`; subsequently computed rows record the observed spacing.
+
 Catalog population is available through `stormhub populate`, `stormhub resume`,
 `stormhub export-dss`, and `stormhub adopt-checkpoint` (also `python -m stormhub`). After updating an editable
 checkout, run `python -m pip install --no-deps -e .` to register the new command.
@@ -217,10 +229,12 @@ Export requires `--item-ids ...` or `--all-items`, and refuses existing selected
 outputs unless `--overwrite` is explicit. See the
 [CLI workflow and limitations](docs/source/user_guide.rst#catalog-command-line-workflow).
 
-New searches retain version 2 population settings with the complete UTC start
-roster, four-cell translation stride and 24-hour declustering buffer. Each
+New searches retain version 3 population settings with the complete UTC start
+roster, ordered four-cell and one-cell spacings and 24-hour declustering buffer. Each
 invocation has its own `population-attempts/*.json` receipt. It records missing
-search dates, failed workers and the expected ranked Item IDs and event starts.
+search dates, dates requiring fallback, failed workers and the expected ranked
+Item IDs and event starts. Exhausted placements are recorded by date as
+`no_valid_placement`. Ranked Items must match the search method and observed spacing.
 Search workers can finish other members after an error. The command exits
 unsuccessfully if any required work fails or the saved collection differs from
 the ranked roster. After a pre-ranking interruption, resume selects only
@@ -228,13 +242,12 @@ missing dates from the frozen roster. Chronological input to the existing
 descending-mean sorter reproduces serial roster order when scores tie.
 Inspect partial ranked Items and finalization failures separately before
 starting a successor. A receipt marked running can survive an abrupt host stop.
-Existing version 1 settings retain their identity and cannot resume as version 2.
+Existing settings retain their identity. Resume requires an exact match with
+the current method and frozen roster.
 
 The four original transpose reference assertions are selected by the scientific
-CI lane. Their small fixture predates the production stride change. All four
-currently fail at the four-cell setting on the integration baseline. See
-[StormHub #48](https://github.com/harrisbienn/stormhub/issues/48) for the
-comparison with the original one-cell setting and the scientific disposition.
+CI lane. Their small fixture exercises the one-cell fallback. The separate
+four-cell reference exercises successful coarse searches with and without missing data.
 
 For the LWI Region 3 geometry revision, follow the
 [catalog rerun runbook](docs/source/lwi_geometry_rerun.rst). It records the

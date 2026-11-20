@@ -12,7 +12,9 @@ import pytest
 from stormhub import cli
 from stormhub.met import catalog_population, storm_catalog
 from stormhub.met.population_accounting import PopulationFailure
+from stormhub.met.consts import TRANSPOSITION_METHOD
 from test_catalog_population import catalog as catalog
+from test_transpose_production_stride import historical_search
 
 
 def configure(catalog):
@@ -27,10 +29,12 @@ def configure(catalog):
 def worker(catalog, date, duration, *, return_item=False, por_rank=None, collection_id=None):
     """Stub only the external rainfall calculation, retaining the STAC and ranking paths."""
     stats = {"min": 0, "mean": 20 - date.day, "max": 25}
+    stride = historical_search().selected_stride_cells if date.day == 1 else 4
     if not return_item:
         return {
             "storm_date": date.strftime("%Y-%m-%dT%H"),
             "aorc:statistics": stats,
+            "translation_stride_cells": stride,
             "centroid": SimpleNamespace(x=0.5, y=0.5),
         }
     path = Path(catalog.spm.collection_item(collection_id, str(por_rank)))
@@ -41,7 +45,8 @@ def worker(catalog, date, duration, *, return_item=False, por_rank=None, collect
         {"type": "Point", "coordinates": [0.5, 0.5]},
         [0.5] * 4,
         datetime=None,
-        properties={"aorc:statistics": stats},
+        properties={"aorc:statistics": stats,
+                    "stormhub:transposition_search": {"method": TRANSPOSITION_METHOD, "stride_cells": stride}},
         start_datetime=start,
         end_datetime=start + timedelta(hours=duration),
     )
@@ -54,7 +59,8 @@ def attempts(root):
     return [json.loads(path.read_bytes()) for path in (root / "24hr-events/population-attempts").glob("*.json")]
 
 
-def test_missing_search_member_resume_and_ranked_identity(catalog, monkeypatch):
+@pytest.mark.parametrize("reason", ["OSError", "no_valid_placement"])
+def test_missing_search_member_resume_and_ranked_identity(catalog, monkeypatch, reason):
     """One failed member cannot reach ranking; resume computes only the missing member."""
     root = configure(catalog)
     independent = root.parent.parent / "fresh" / root.name
@@ -63,6 +69,10 @@ def test_missing_search_member_resume_and_ranked_identity(catalog, monkeypatch):
 
     def fail_one(catalog, date, duration, **options):
         if date.day == 4:
+            if reason == "no_valid_placement":
+                search = historical_search()
+                search.data_array.values[:] = float("nan")
+                search.max_transpose()
             raise OSError("injected member outage")
         return worker(catalog, date, duration, **options)
 
@@ -71,6 +81,8 @@ def test_missing_search_member_resume_and_ranked_identity(catalog, monkeypatch):
     (first,) = attempts(root)
     assert first["status"] == "failed" and len(first["search"]["completed"]) == 9
     assert first["items"] is None and first["search"]["missing"] == ["2020-01-04T00"]
+    assert first["worker_failures"] == {"2020-01-04T00:00:00": reason}
+    assert first["search"]["fallback_dates"] == ["2020-01-01T00"]
     assert not (root / "24hr-events/collection.json").exists()
     record = (root / "24hr-events/population-settings.json").read_bytes()
 
@@ -87,6 +99,8 @@ def test_missing_search_member_resume_and_ranked_identity(catalog, monkeypatch):
     assert successful["search"]["completed"] == json.loads(record)["requested_starts_utc"]
     assert successful["items"]["completed"] == ["1", "2"]
     assert successful["items"]["missing"] == []
+    assert successful["search"]["fallback_dates"] == ["2020-01-01T00"]
+    assert json.loads(record)["method"]["first_nonempty_strides_cells"] == [4, 1]
     assert first in attempts(root)
     assert cli.main(["populate", str(independent), "--duration", "24"]) == 0
     (fresh,) = attempts(independent)
@@ -95,7 +109,7 @@ def test_missing_search_member_resume_and_ranked_identity(catalog, monkeypatch):
         assert (root / "24hr-events" / name).read_bytes() == (independent / "24hr-events" / name).read_bytes()
 
 
-@pytest.mark.parametrize("failure", ["worker", "lost-item", "finalization"])
+@pytest.mark.parametrize("failure", ["worker", "lost-item", "wrong-stride", "finalization"])
 def test_incomplete_items_or_catalog_never_complete(catalog, monkeypatch, failure):
     """Require exact disk membership and a successful final catalog write."""
     root = configure(catalog)
@@ -106,6 +120,12 @@ def test_incomplete_items_or_catalog_never_complete(catalog, monkeypatch, failur
         result = worker(*args, **kwargs)
         if kwargs.get("por_rank") == 2 and failure == "lost-item":
             (root / "24hr-events/2/2.json").unlink()
+        if kwargs.get("por_rank") == 2 and failure == "wrong-stride":
+            path = root / "24hr-events/2/2.json"
+            item = json.loads(path.read_bytes())
+            method = item["properties"]["stormhub:transposition_search"]
+            method["stride_cells"] = 1 if method["stride_cells"] == 4 else 4
+            path.write_text(json.dumps(item))
         return result
 
     def refuse_save(self):
