@@ -31,7 +31,7 @@ class StormAnalyzer:
         df["storm_date"] = pd.to_datetime(df["storm_date"])
         return df[df["mean"] >= self.threshold]
 
-    def _initialize_filter(self):
+    def _initialize_filter(self, buffer_hours: int = DECLUSTERING_BUFFER_HOURS):
         """Initialize storm filter."""
         if self.metrics_df["storm_date"].isnull().all():
             raise ValueError(
@@ -44,7 +44,10 @@ class StormAnalyzer:
         if pd.isna(start) or pd.isna(end):
             raise ValueError("Start or end date is NaT. Please check the input data and ensure events meet threshold.")
 
-        return StormFilter(start, end, datetime.timedelta(hours=1))
+        interval = datetime.timedelta(hours=1)
+        # The filter checks both endpoints; arange excludes its upper bound.
+        last_endpoint = end + datetime.timedelta(hours=self.duration_hours + buffer_hours)
+        return StormFilter(start, last_endpoint + interval, interval)
 
     def rank_and_filter_storms(self, buffer_hours: int = DECLUSTERING_BUFFER_HOURS) -> pd.DataFrame:
         """Rank and filter storms.
@@ -52,6 +55,7 @@ class StormAnalyzer:
         buffer_hours represent the time between potential storm events.
         TODO: Investigate appropriate values for this and verify functionality.
         """
+        self.filter = self._initialize_filter(buffer_hours)
         storm_records = []
         overlapping_overall_rank = 1
         non_overlapping_rank = 1

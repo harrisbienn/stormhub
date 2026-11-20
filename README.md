@@ -230,7 +230,12 @@ outputs unless `--overwrite` is explicit. See the
 [CLI workflow and limitations](docs/source/user_guide.rst#catalog-command-line-workflow).
 
 New searches retain version 3 population settings with the complete UTC start
-roster, ordered four-cell and one-cell spacings and 24-hour declustering buffer. Each
+roster, ordered four-cell and one-cell spacings and 24-hour declustering buffer.
+The ranking time grid includes the last eligible start's full duration and buffer.
+This permits a single qualifying start to rank first and lets terminal events
+compete in a longer roster. Earlier catalogs retain their rankings. A checkpoint
+without the recorded `declustering_horizon` needs a fresh catalog to use this
+ranking policy. Each
 invocation has its own `population-attempts/*.json` receipt. It records missing
 search dates, dates requiring fallback, failed workers and the expected ranked
 Item IDs and event starts. Exhausted placements are recorded by date as

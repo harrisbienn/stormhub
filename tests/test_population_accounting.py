@@ -59,6 +59,45 @@ def attempts(root):
     return [json.loads(path.read_bytes()) for path in (root / "24hr-events/population-attempts").glob("*.json")]
 
 
+def test_single_start_reaches_rank_one_and_catalog_finalization(catalog, monkeypatch):
+    """A single qualifying search result must produce its one declared Item."""
+    root = configure(catalog)
+    monkeypatch.setattr(storm_catalog, "storm_search", worker)
+    assert cli.main(["populate", str(root), "--duration", "24", "--specific-date", "2020-01-03T00:00:00Z"]) == 0
+    (record,) = attempts(root)
+    assert record["status"] == "complete"
+    assert record["items"]["requested"] == {"1": "2020-01-03T00"}
+    assert record["items"]["completed"] == ["1"]
+    assert (root / "24hr-events/collection.json").is_file()
+
+
+def test_terminal_event_and_nondefault_buffer(tmp_path):
+    """A highest-ranked final start competes normally with earlier overlapping events."""
+    csv_path = tmp_path / "storm-stats.csv"
+    csv_path.write_text("storm_date,min,mean,max\n2020-01-01T00,2,3,4\n"
+                        "2020-01-09T00,3,4,5\n2020-01-10T00,4,5,6\n")
+    analyzer = storm_catalog.StormAnalyzer(str(csv_path), 2.5, 24)
+    ranked = analyzer.rank_and_filter_storms(buffer_hours=72)
+    assert list(zip(ranked.storm_date, ranked.por_rank)) == [("2020-01-10T00", 1), ("2020-01-01T00", 2)]
+    assert analyzer.rank_and_filter_storms(buffer_hours=72).equals(ranked)
+
+
+def test_resume_refuses_previous_declustering_horizon(catalog):
+    """An interrupted search may resume only with its original ranking policy."""
+    root = configure(catalog)
+    context = catalog_population.PopulationContext.load(root, 24)
+    legacy = context.provenance(context.search())
+    assert legacy["method"].pop("declustering_horizon") == "through-final-candidate-end-plus-buffer"
+    context.directory.mkdir()
+    settings = context.directory / "population-settings.json"
+    settings.write_text(json.dumps(legacy))
+    before = settings.read_bytes()
+    with pytest.raises(ValueError, match="Resume settings"):
+        catalog_population.resume_catalog(root, duration_hours=24)
+    assert settings.read_bytes() == before
+    assert not (context.directory / "population-attempts").exists()
+
+
 @pytest.mark.parametrize("reason", ["OSError", "no_valid_placement"])
 def test_missing_search_member_resume_and_ranked_identity(catalog, monkeypatch, reason):
     """One failed member cannot reach ranking; resume computes only the missing member."""
