@@ -31,6 +31,7 @@ from stormhub.met.consts import (
     AORC_Y_VAR,
     MM_TO_INCH_CONVERSION_FACTOR,
     NOAA_AORC_S3_BASE_URL,
+    TRANSPOSITION_METHOD,
 )
 
 
@@ -249,9 +250,14 @@ class AORCItem(Item):
             self._transposed_watershed, self._transposition_transform, self._stats = self.transpose.max_transpose(
                 self._create_stats
             )
+            self._translation_stride_cells = self.transpose.selected_stride_cells
         if add_properties:
             self.geometry = json.loads(to_geojson(self._transposed_watershed.centroid))
             self.properties["aorc:statistics"] = self._stats
+            self.properties["stormhub:transposition_search"] = {
+                "method": TRANSPOSITION_METHOD,
+                "stride_cells": self._translation_stride_cells,
+            }
             self.properties["aorc:transform"] = {
                 "a": self._transposition_transform.a,
                 "b": self._transposition_transform.b,
@@ -292,9 +298,7 @@ class AORCItem(Item):
         - original transposition domain
         """
         if self._transposed_watershed is None:
-            self._transposed_watershed, self._transposition_transform, self._stats = self.transpose.max_transpose(
-                self._create_stats
-            )
+            self.max_transpose(add_properties=False)
         # Workers may have no Windows desktop. Render directly without a GUI
         # manager, and leave the caller's interactive plotting backend alone.
         fig = Figure(figsize=(5, 5))

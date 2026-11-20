@@ -114,6 +114,37 @@ def test_stale_plan_refuses_changed_checkpoint(catalog):
     assert snapshot(root) == before
 
 
+def test_adopted_resume_marks_historical_spacing_and_preserves_archive(catalog, monkeypatch):
+    """Retain unknown spacing on adopted rows and record effective spacing on new rows."""
+    from stormhub.met import storm_catalog as storms
+    from types import SimpleNamespace
+
+    root, directory = legacy(catalog)
+    stats = directory / "storm-stats.csv"
+    original = stats.read_bytes()
+    result = apply(root)
+
+    def append_one(catalog_path, **options):
+        storms.prepare_stats_csv(str(stats))
+        row = storms.storm_search_results_to_csv_line({
+            "storm_date": "2020-01-01T12", "aorc:statistics": {"min": 1, "mean": 2, "max": 3},
+            "centroid": SimpleNamespace(x=0, y=0), "translation_stride_cells": 1,
+        })
+        with stats.open("a") as stream:
+            stream.write(row)
+        return SimpleNamespace(id="72hr-events")
+
+    monkeypatch.setattr(storms, "resume_collection", append_one)
+    resume_catalog(root, duration_hours=72)
+    rows = stats.read_text().splitlines()
+    assert rows[0] == storms.STATS_HEADER
+    assert [row.rsplit(",", 1)[1] for row in rows[1:]] == ["legacy_unrecorded", "legacy_unrecorded", "1"]
+    assert (Path(result["backup"]) / "retired/72hr-events/storm-stats.csv").read_bytes() == original
+    stats.write_text(stats.read_text().replace(",legacy_unrecorded", ",4", 1))
+    with pytest.raises(ValueError, match="Historical rows differ"):
+        resume_catalog(root, duration_hours=72)
+
+
 def test_archive_failure_leaves_live_collection_untouched(catalog, monkeypatch):
     """Do not switch configurations or retire originals unless archive verification passes."""
     root, directory = legacy(catalog)

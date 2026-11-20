@@ -195,6 +195,18 @@ execution, provider acquisition, scientific acceptance or runtime activation.
 ## Usage
 See the [User Guide](https://stormhub.readthedocs.io/en/latest/user_guide.html).
 
+New AORC searches use `aorc-maximum-mean-transposition-v2`. StormHub first
+tries watershed placements four raster cells apart in both axes. Only an empty
+set of valid placements triggers a one-cell search on the same grid and mask.
+The first nonempty set supplies both the valid area and the maximum-mean
+placement. An empty exhaustive search raises `no_valid_placement`. I/O or
+worker errors propagate separately. New statistics rows record
+`translation_stride_cells`, and ranked Items record the method and effective
+stride under `stormhub:transposition_search`. For a reviewed legacy checkpoint,
+confirm compatible source settings before adoption. Its archive retains the
+original bytes. On resume its working CSV labels the historical spacing
+`legacy_unrecorded`; subsequently computed rows record the observed spacing.
+
 Catalog population is available through `stormhub populate`, `stormhub resume`,
 `stormhub export-dss`, and `stormhub adopt-checkpoint` (also `python -m stormhub`). After updating an editable
 checkout, run `python -m pip install --no-deps -e .` to register the new command.
