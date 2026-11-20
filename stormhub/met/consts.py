@@ -8,6 +8,8 @@ AORC_Y_VAR = "latitude"
 
 TRANSPOSITION_METHOD = "aorc-maximum-mean-transposition-v2"
 TRANSLATION_STRIDES = (4, 1)
+DECLUSTERING_BUFFER_HOURS = 24
+STATS_HEADER = "storm_date,min,mean,max,x,y,translation_stride_cells"
 
 MM_TO_INCH_CONVERSION_FACTOR = 0.03937007874015748
 

@@ -8,6 +8,8 @@ from typing import Union
 import numpy as np
 import pandas as pd
 
+from stormhub.met.consts import DECLUSTERING_BUFFER_HOURS
+
 from stormhub.utils import StacPathManager
 
 
@@ -44,7 +46,7 @@ class StormAnalyzer:
 
         return StormFilter(start, end, datetime.timedelta(hours=1))
 
-    def rank_and_filter_storms(self, buffer_hours: int = 24) -> pd.DataFrame:
+    def rank_and_filter_storms(self, buffer_hours: int = DECLUSTERING_BUFFER_HOURS) -> pd.DataFrame:
         """Rank and filter storms.
 
         buffer_hours represent the time between potential storm events.

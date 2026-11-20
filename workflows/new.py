@@ -61,6 +61,7 @@ if __name__ == "__main__":
     # Collection Args
     storm_duration_hours = 48
     min_precip_threshold = 2.5
+    check_every_n_hours = 48
 
     save_config(
         start_date=start_date,
@@ -68,6 +69,7 @@ if __name__ == "__main__":
         top_n_events=top_n_events,
         storm_duration_hours=storm_duration_hours,
         min_precip_threshold=min_precip_threshold,
+        check_every_n_hours=check_every_n_hours,
         root_dir=root_dir,
         catalog_id=catalog_id,
         local_directory=local_directory,
@@ -81,7 +83,7 @@ if __name__ == "__main__":
         top_n_events,
         use_threads=True, #True for Linux/WSL, False for Windows
         num_workers=8, # Number of parallel workers
-        check_every_n_hours=48,
+        check_every_n_hours=check_every_n_hours,
     )
     # Add config file as a STAC collection asset
     add_config_to_collection(storm_collection)

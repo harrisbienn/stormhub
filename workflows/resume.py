@@ -39,7 +39,7 @@ if __name__ == "__main__":
         storm_duration=storm_duration_hours,
         min_precip_threshold=min_precip_threshold,
         top_n_events=top_n_events,
-        check_every_n_hours=24,
+        check_every_n_hours=config["check_every_n_hours"],
         with_tb=False,
         create_items=True,
     )
