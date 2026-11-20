@@ -12,6 +12,14 @@ from shapely import Polygon
 from shapely.affinity import translate
 from shapely.geometry import shape
 
+from stormhub.met.consts import TRANSLATION_STRIDES
+
+
+class NoValidPlacementError(ValueError):
+    """Neither search spacing fits a nonempty watershed entirely on finite cells."""
+
+    code = "no_valid_placement"
+
 
 class Transpose:
     """
@@ -48,6 +56,7 @@ class Transpose:
         self._watershed_mask = None
         self._watershed_mask_clipped = None
         self._valid_shifts = None
+        self._selected_stride = None
         self._valid_spaces = None
         self._valid_spaces_polygon = None
         self._data_array_x_coords = None
@@ -151,47 +160,42 @@ class Transpose:
             self._calculate_watershed_mask_and_window()
         return self._watershed_mask_clipped
 
+    def _find_valid_shifts(self, stride: int) -> list[tuple[int, int]]:
+        mask = self.watershed_mask_clipped
+        if not mask.any():
+            return []
+        rows, cols = self.watershed_window.toslices()
+        height, width = mask.shape
+        values = self.np_data_array
+        shifts = []
+        # Start at the raster origin and retain column-first order for tied means.
+        for col in range(0, self.width - width + 1, stride):
+            for row in range(0, self.height - height + 1, stride):
+                window = values[row : row + height, col : col + width]
+                if np.isfinite(window[mask]).all():
+                    shifts.append((col - cols.start, row - rows.start))
+        return shifts
+
     @property
     def valid_shifts(self) -> list[tuple[int, int]]:
-        """
-        Calculate and return a list of valid shift values for the watershed mask.
-
-        This method determines the valid shifts that can be applied to the watershed mask
-        within the bounds of the data array. It iterates over possible shifts and checks
-        if the shifted mask is still within the valid data region.
-
-        Returns
-        -------
-            list[tuple[int, int]]: A list of tuples representing the valid (x, y) shifts.
-        """
+        """Use the first spacing with valid placements, including for coverage geometry."""
         if self._valid_shifts is None:
-            original_window_row_slice, original_window_col_slice = self.watershed_window.toslices()
-            shifts: list[tuple[int, int]] = []
-            min_x_delta = 0 - self.watershed_window.col_off
-            min_y_delta = 0 - self.watershed_window.row_off
-            max_x_delta = self.width - (self.watershed_window.col_off + self.watershed_window.width)
-            max_y_delta = self.height - (self.watershed_window.row_off + self.watershed_window.height)
-            x_delta = min_x_delta
-            y_delta = min_y_delta
-            while x_delta <= max_x_delta:
-                while y_delta <= max_y_delta:
-                    adjusted_row_start = original_window_row_slice.start + y_delta
-                    adjusted_row_stop = original_window_row_slice.stop + y_delta
-                    adjusted_col_start = original_window_col_slice.start + x_delta
-                    adjusted_col_stop = original_window_col_slice.stop + x_delta
-                    data_clipped = self.np_data_array[
-                        adjusted_row_start:adjusted_row_stop, adjusted_col_start:adjusted_col_stop
-                    ]
-                    data_mask = np.isfinite(data_clipped)
-                    combined_mask = np.logical_and(self.watershed_mask_clipped, data_mask)
-                    if np.array_equal(combined_mask, self.watershed_mask_clipped):
-                        shifts.append((x_delta, y_delta))
-                    y_delta += 4
-                x_delta += 4
-                y_delta = min_y_delta
+            for stride in TRANSLATION_STRIDES:
+                shifts = self._find_valid_shifts(stride)
+                if shifts:
+                    self._selected_stride = stride
+                    break
             self._valid_shifts = shifts
-
+        if not self._valid_shifts:
+            raise NoValidPlacementError("no_valid_placement: no valid watershed placement at strides 4 and 1")
         return self._valid_shifts
+
+    @property
+    def selected_stride_cells(self) -> int:
+        """Return the spacing that supplied the candidate set for this event."""
+        if self._selected_stride is None:
+            _ = self.valid_shifts
+        return self._selected_stride
 
     @property
     def valid_spaces(self) -> np.ndarray:

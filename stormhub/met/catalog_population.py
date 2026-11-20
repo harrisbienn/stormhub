@@ -12,6 +12,8 @@ from typing import Any, Sequence
 
 import pystac
 
+from stormhub._files import atomic_write_bytes
+from stormhub.met.consts import TRANSLATION_STRIDES, TRANSPOSITION_METHOD
 from stormhub.met.catalog_setup import load_catalog_settings
 from stormhub.met import storm_catalog as storms
 
@@ -125,7 +127,30 @@ class PopulationContext:
             if path.resolve() != path:
                 raise ValueError(f"Population input must not traverse filesystem links: {path}")
             hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-        return {"version": 1, "catalog_id": self.settings["catalog_id"], "inputs_sha256": hashes, "search": search}
+        return {
+            "version": 2, "catalog_id": self.settings["catalog_id"], "inputs_sha256": hashes, "search": search,
+            "method": {"id": TRANSPOSITION_METHOD, "first_nonempty_strides_cells": list(TRANSLATION_STRIDES)},
+        }
+
+
+def statistics_rows_sha256(rows: list[str]) -> str:
+    """Identify historical CSV records independently of their encoding and line endings."""
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def prepare_adopted_statistics(path: Path, receipt: dict) -> None:
+    """Upgrade only the verified working copy. Historical rows have no observed stride."""
+    payload = path.read_bytes()
+    lines = payload.decode("utf-8-sig").splitlines()
+    if lines and lines[0] == storms.STATS_HEADER:
+        historical = [line.rsplit(",", 1)[0] for line in lines[1:] if line.endswith(",legacy_unrecorded")]
+        if statistics_rows_sha256(historical) != receipt["statistics_rows_sha256"]:
+            raise ValueError("Historical rows differ from the adopted checkpoint")
+        return  # A previous resume already upgraded this working copy.
+    if hashlib.sha256(payload).hexdigest() != receipt["statistics_sha256"]:
+        raise ValueError("Adopted statistics differ from the archived checkpoint")
+    rows = [storms.STATS_HEADER, *(line + ",legacy_unrecorded" for line in lines[1:] if line)]
+    atomic_write_bytes(path, ("\n".join(rows) + "\n").encode("utf-8"), immutable=False)
 
 
 def _workers(context: PopulationContext, num_workers: int | None) -> dict[str, Any]:
@@ -225,6 +250,8 @@ def resume_catalog(
     workers = _workers(context, num_workers)
     if dry_run:
         return {"operation": "resume", "catalog": str(context.catalog_file), **expected, **workers}
+    if adoption is not None:
+        prepare_adopted_statistics(context.directory / "storm-stats.csv", evidence)
     result = storms.resume_collection(
         str(context.catalog_file),
         **{key: value for key, value in search.items() if key != "specific_dates"},
