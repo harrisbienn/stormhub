@@ -28,6 +28,7 @@ from pystac.extensions.file import FileExtension
 from stormhub.hydro_domain import HydroDomain
 from stormhub.logger import initialize_logger
 from stormhub.met.analysis import StormAnalyzer
+from stormhub.met.population_accounting import PopulationAttempt, PopulationFailure, completed_dates
 from stormhub.met.aorc.aorc import AORCItem, valid_spaces_item
 from stormhub.met.zarr_to_dss import (
     get_aorc_paths,
@@ -822,19 +823,25 @@ def serial_processor(
 
     count = len(event_dates)
 
+    failed = {}
     with open(output_csv, "a", encoding="utf-8") as f:
         for date in event_dates:
             try:
                 r = func(catalog, date, storm_duration)
+                if r["storm_date"] != date.strftime("%Y-%m-%dT%H"):
+                    raise ValueError("Worker returned a different storm date")
                 f.write(storm_search_results_to_csv_line(r))
                 logging.info("%s processed (%d remaining)", r["storm_date"], count)
                 count -= 1
             except Exception as e:
+                failed[date.isoformat()] = type(e).__name__
                 if with_tb:
                     tb = traceback.format_exc()
                     logging.error("Error processing: %s\n%s", e, tb)
                 else:
                     logging.error("Error processing: %s", e)
+    if failed:
+        raise PopulationFailure("statistics", failed)
 
 
 def multi_processor(
@@ -888,10 +895,11 @@ def multi_processor(
     if mp_context is not None:
         executor_kwargs["mp_context"] = mp_context
 
+    failed = {}
     with executor_class(**executor_kwargs) as executor:
         for i in range(0, len(event_dates), batch_size):
             batch = event_dates[i : i + batch_size]
-            futures = [executor.submit(func, catalog, date, storm_duration) for date in batch]
+            futures = {executor.submit(func, catalog, date, storm_duration): date for date in batch}
 
             # Write results as they complete
             with open(output_csv, "a", encoding="utf-8") as f:
@@ -899,6 +907,8 @@ def multi_processor(
                     count -= 1
                     try:
                         r = future.result()
+                        if r["storm_date"] != futures[future].strftime("%Y-%m-%dT%H"):
+                            raise ValueError("Worker returned a different storm date")
                         f.write(storm_search_results_to_csv_line(r))
                         f.flush()  # Force write to disk
                         logging.info("%s processed (%d remaining)", r["storm_date"], count)
@@ -907,6 +917,7 @@ def multi_processor(
                         del r
 
                     except Exception as e:
+                        failed[futures[future].isoformat()] = type(e).__name__
                         if with_tb:
                             tb = traceback.format_exc()
                             logging.error("Error processing: %s\n%s", e, tb)
@@ -917,6 +928,8 @@ def multi_processor(
             del futures
             del batch
             gc.collect()
+    if failed:
+        raise PopulationFailure("statistics", failed)
 
 
 def collect_event_stats(
@@ -1058,7 +1071,8 @@ def create_items(
         executor_kwargs["mp_context"] = mp_context
 
     with executor_class(**executor_kwargs) as executor:
-        futures = [
+        failed = {}
+        futures = {
             executor.submit(
                 storm_search,
                 catalog,
@@ -1067,9 +1081,9 @@ def create_items(
                 por_rank=por_rank,
                 collection_id=collection_id,
                 return_item=True,
-            )
+            ): str(por_rank)
             for storm_date, por_rank in storm_data
-        ]
+        }
 
         for future in as_completed(futures):
             count -= 1
@@ -1081,12 +1095,15 @@ def create_items(
                     logging.info("%s processed (%d remaining)", r.datetime, count)
 
             except Exception as e:
+                failed[futures[future]] = type(e).__name__
                 if with_tb:
                     tb = traceback.format_exc()
                     logging.error("Error processing: %s\n%s", e, tb)
                 else:
                     logging.error("Error processing: %s", e)
 
+    if failed:
+        raise PopulationFailure("ranked Items", failed)
     return None
 
 
@@ -2328,6 +2345,7 @@ def new_collection(
     with_tb: bool = False,
     create_new_items: bool = True,
     overwrite_stats: bool = False,
+    attempt: PopulationAttempt = None,
 ):
     """
     Create a new storm collection.
@@ -2389,6 +2407,8 @@ def new_collection(
             overwrite_stats=overwrite_stats,
         )
     stats_csv = os.path.join(storm_catalog.spm.collection_dir(collection_id), "storm-stats.csv")
+    if attempt is not None:
+        attempt.check_search()
     try:
         logging.info("Starting storm analysis for: %s", stats_csv)
         analyzer = StormAnalyzer(stats_csv, min_precip_threshold, storm_duration)
@@ -2396,6 +2416,9 @@ def new_collection(
         logging.error("No events at threshold `min_precip_threshold` %d: %s", min_precip_threshold, e)
         return
 
+    if attempt is not None:
+        # Restore serial roster order before the existing sorter sees tied means.
+        analyzer.metrics_df = analyzer.metrics_df.sort_values("storm_date")
     logging.info("Ranking storm events and selecting top %d events", top_n_events)
     ranked_data, ranked_storms_output_path = analyzer.rank_and_save(collection_id, storm_catalog.spm)
 
@@ -2403,14 +2426,21 @@ def new_collection(
 
     if create_new_items:
         logging.info("Creating items for top %d events", len(top_events))
-        create_items(
-            top_events.to_dict(orient="records"),
-            storm_catalog,
-            storm_duration=storm_duration,
-            with_tb=with_tb,
-            num_workers=num_workers,
-            use_threads=use_threads,
-        )
+        rows = top_events.to_dict(orient="records")
+        if attempt is not None:
+            attempt.plan_items(rows)
+        try:
+            create_items(rows, storm_catalog, storm_duration=storm_duration, with_tb=with_tb,
+                         num_workers=num_workers, use_threads=use_threads)
+        except PopulationFailure as exc:
+            if attempt is not None:
+                attempt.record["worker_failures"] = exc.failed
+                attempt.check_items(Path(stats_csv).parent, storm_duration)
+            raise
+        if attempt is not None:
+            attempt.check_items(Path(stats_csv).parent, storm_duration)
+            attempt.record["phase"] = "finalization"
+            attempt.save()
         collection = storm_catalog.new_collection_from_items_on_disk(collection_id)
 
     else:
@@ -2425,6 +2455,10 @@ def new_collection(
     storm_catalog.add_collection_to_catalog(collection, override=True)
     logging.info("Saving catalog and collection.")
     storm_catalog.save_catalog()
+    if attempt is not None:
+        saved = pystac.Catalog.from_file(storm_catalog.spm.catalog_file).get_child(collection_id)
+        if saved is None or sorted(item.id for item in saved.get_items()) != sorted(attempt.record["items"]["requested"]):
+            raise ValueError("Published collection differs from the requested ranked Items")
     return collection
 
 
@@ -2440,6 +2474,7 @@ def resume_collection(
     with_tb: bool = False,
     create_items: bool = True,
     use_threads: bool = False,
+    attempt: PopulationAttempt = None,
 ):
     """
     Resume a storm collection.
@@ -2465,7 +2500,13 @@ def resume_collection(
     collection_id = storm_catalog.spm.storm_collection_id(storm_duration)
     partial_stats_csv = os.path.join(storm_catalog.spm.collection_dir(collection_id), "storm-stats.csv")
     logging.info("Searching for missing storm dates in %s", partial_stats_csv)
-    dates = find_missing_storm_dates(partial_stats_csv, start_date, end_date, every_n_hours=check_every_n_hours)
+    if attempt is None:
+        dates = find_missing_storm_dates(partial_stats_csv, start_date, end_date, every_n_hours=check_every_n_hours)
+    else:
+        seen = completed_dates(Path(partial_stats_csv))
+        if not seen <= attempt.dates:
+            raise ValueError("Checkpoint contains a date outside the frozen search roster")
+        dates = [datetime.strptime(value, "%Y-%m-%dT%H") for value in sorted(attempt.dates - seen)]
     logging.info("%d dates found missing from %s - %s.", len(dates), start_date, end_date)
 
     return new_collection(
@@ -2481,4 +2522,5 @@ def resume_collection(
         with_tb=with_tb,
         create_new_items=create_items,
         use_threads=use_threads,
+        attempt=attempt,
     )

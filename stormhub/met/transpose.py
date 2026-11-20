@@ -12,6 +12,8 @@ from shapely import Polygon
 from shapely.affinity import translate
 from shapely.geometry import shape
 
+from stormhub.met.consts import TRANSLATION_STRIDE_CELLS
+
 
 class Transpose:
     """
@@ -186,8 +188,8 @@ class Transpose:
                     combined_mask = np.logical_and(self.watershed_mask_clipped, data_mask)
                     if np.array_equal(combined_mask, self.watershed_mask_clipped):
                         shifts.append((x_delta, y_delta))
-                    y_delta += 4
-                x_delta += 4
+                    y_delta += TRANSLATION_STRIDE_CELLS
+                x_delta += TRANSLATION_STRIDE_CELLS
                 y_delta = min_y_delta
             self._valid_shifts = shifts
 

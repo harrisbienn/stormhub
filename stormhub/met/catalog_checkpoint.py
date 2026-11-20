@@ -134,7 +134,7 @@ def adopt_checkpoint(
 
     CSV dates/values are checked, but historical geometry and kernel settings
     cannot be inferred from CSV alone. ``settings_confirmed`` attests that all
-    retained rows used the displayed duration and domain inputs. A stopped smoke
+    retained rows used the displayed method, temporal selection, duration and domain inputs. A stopped smoke
     checkpoint can seed a full search when its rows meet that same contract.
 
     Execution requires the fingerprint from a stopped-writer dry run. Source

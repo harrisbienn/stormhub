@@ -14,6 +14,9 @@ import pystac
 
 from stormhub.met.catalog_setup import load_catalog_settings
 from stormhub.met import storm_catalog as storms
+from stormhub._files import atomic_write_bytes, exclusive_file_lock
+from stormhub.met.consts import DECLUSTERING_BUFFER_HOURS, TRANSLATION_STRIDE_CELLS
+from stormhub.met.population_accounting import PopulationAttempt
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -125,7 +128,43 @@ class PopulationContext:
             if path.resolve() != path:
                 raise ValueError(f"Population input must not traverse filesystem links: {path}")
             hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-        return {"version": 1, "catalog_id": self.settings["catalog_id"], "inputs_sha256": hashes, "search": search}
+        dates = search["specific_dates"]
+        if dates is None:
+            roster = storms.generate_date_range(search["start_date"], search["end_date"],
+                                                every_n_hours=search["check_every_n_hours"])
+        else:
+            roster = [_utc_date(date) for date in dates]
+        return {
+            "version": 2, "catalog_id": self.settings["catalog_id"], "inputs_sha256": hashes, "search": search,
+            "requested_starts_utc": [date.strftime("%Y-%m-%dT%H") for date in roster],
+            "method": {
+                "id": "aorc-maximum-mean-transposition-v1", "translation_stride_cells": TRANSLATION_STRIDE_CELLS,
+                "rank_order": "descending-mean", "declustering_buffer_hours": DECLUSTERING_BUFFER_HOURS,
+            },
+        }
+
+
+def _run_population(context, record, operation, options, *, fresh):
+    settings_path = context.directory / "population-settings.json"
+    # All duration finalizers share the root catalog. Refuse concurrent cooperating writers.
+    lock = context.catalog_file.parent / ".population.lock"
+    if lock.resolve() != lock:
+        raise ValueError("Unsafe population lock path")
+    with exclusive_file_lock(lock, timeout=0):
+        if fresh:
+            context.directory.mkdir(exist_ok=False)
+            atomic_write_bytes(settings_path, (json.dumps(record, indent=2) + "\n").encode(), immutable=False)
+        if (context.directory / "collection.json").exists() or any(
+            path.is_dir() and path.name != "population-attempts" for path in context.directory.iterdir()
+        ):
+            raise ValueError("Population refuses existing Item or collection products")
+        attempt = PopulationAttempt(context.directory, record["requested_starts_utc"],
+                                    hashlib.sha256(settings_path.read_bytes()).hexdigest())
+        with attempt.track():
+            result = operation(str(context.catalog_file), attempt=attempt, **options)
+            if result is None:
+                raise RuntimeError("Population produced no collection; inspect the attempt and storm statistics")
+    return result
 
 
 def _workers(context: PopulationContext, num_workers: int | None) -> dict[str, Any]:
@@ -163,20 +202,9 @@ def populate_catalog(
     plan = {"operation": "populate", "catalog": str(context.catalog_file), **record, **workers}
     if dry_run:
         return plan
-    context.directory.mkdir(exist_ok=False)
-    with (context.directory / "population-settings.json").open("x", encoding="utf-8") as stream:
-        json.dump(record, stream, indent=2)
-        stream.write("\n")
-    dates = None if search["specific_dates"] is None else [_utc_date(value) for value in search["specific_dates"]]
-    result = storms.new_collection(
-        str(context.catalog_file),
-        **{**search, "specific_dates": dates},
-        **workers,
-        with_tb=with_tb,
-    )
-    if result is None:
-        raise RuntimeError("Population produced no collection; inspect logs and storm statistics before retrying")
-    return result
+    dates = [_utc_date(value) for value in record["requested_starts_utc"]]
+    return _run_population(context, record, storms.new_collection,
+                           {**search, "specific_dates": dates, **workers, "with_tb": with_tb}, fresh=True)
 
 
 def resume_catalog(
@@ -215,25 +243,19 @@ def resume_catalog(
         raise ValueError("Resume settings or geometry differ, or this was a smoke search; use a new catalog")
     allowed = {"population-settings.json", "storm-stats.csv", "ranked-storms.csv"}
     if any(
-        path.name not in allowed or not path.is_file() or path.resolve() != path for path in context.directory.iterdir()
+        path.resolve() != path or not (
+            (path.name in allowed and path.is_file()) or (path.name == "population-attempts" and path.is_dir())
+        ) for path in context.directory.iterdir()
     ):
         raise ValueError(
             "Resume refuses existing Items, DSS, or other products; inspect and reconcile the interrupted run"
         )
-    if not (context.directory / "storm-stats.csv").is_file():
-        raise ValueError("Resume requires partial storm-stats.csv; no search checkpoint is available")
     workers = _workers(context, num_workers)
     if dry_run:
         return {"operation": "resume", "catalog": str(context.catalog_file), **expected, **workers}
-    result = storms.resume_collection(
-        str(context.catalog_file),
-        **{key: value for key, value in search.items() if key != "specific_dates"},
-        **workers,
-        with_tb=with_tb,
-    )
-    if result is None:
-        raise RuntimeError("Resume produced no collection; inspect logs and storm statistics")
-    return result
+    return _run_population(context, expected, storms.resume_collection,
+                           {**{k: v for k, v in search.items() if k != "specific_dates"}, **workers, "with_tb": with_tb},
+                           fresh=False)
 
 
 def export_catalog_dss(

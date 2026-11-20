@@ -39,7 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command.add_argument(
                 "--settings-confirmed",
                 action="store_true",
-                help="Attest all retained rows used the displayed duration and geometry",
+                help="Attest retained rows used the displayed inputs, search roster and method",
             )
             command.add_argument(
                 "--writers-stopped", action="store_true", help="Attest the notebook and all search workers have stopped"

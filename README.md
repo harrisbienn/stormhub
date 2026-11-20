@@ -217,6 +217,25 @@ Export requires `--item-ids ...` or `--all-items`, and refuses existing selected
 outputs unless `--overwrite` is explicit. See the
 [CLI workflow and limitations](docs/source/user_guide.rst#catalog-command-line-workflow).
 
+New searches retain version 2 population settings with the complete UTC start
+roster, four-cell translation stride and 24-hour declustering buffer. Each
+invocation has its own `population-attempts/*.json` receipt. It records missing
+search dates, failed workers and the expected ranked Item IDs and event starts.
+Search workers can finish other members after an error. The command exits
+unsuccessfully if any required work fails or the saved collection differs from
+the ranked roster. After a pre-ranking interruption, resume selects only
+missing dates from the frozen roster. Chronological input to the existing
+descending-mean sorter reproduces serial roster order when scores tie.
+Inspect partial ranked Items and finalization failures separately before
+starting a successor. A receipt marked running can survive an abrupt host stop.
+Existing version 1 settings retain their identity and cannot resume as version 2.
+
+The four original transpose reference assertions are selected by the scientific
+CI lane. Their small fixture predates the production stride change. All four
+currently fail at the four-cell setting on the integration baseline. See
+[StormHub #48](https://github.com/harrisbienn/stormhub/issues/48) for the
+comparison with the original one-cell setting and the scientific disposition.
+
 For the LWI Region 3 geometry revision, follow the
 [catalog rerun runbook](docs/source/lwi_geometry_rerun.rst). It records the
 2026-09-24 archive verification and the fresh search, DSS validation, and
